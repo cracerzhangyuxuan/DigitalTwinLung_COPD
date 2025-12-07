@@ -1,0 +1,97 @@
+# ============================================================================
+# COPD 数字孪生肺项目 .gitignore
+# ============================================================================
+
+# ===== 数据文件 (体积大，不纳入版本控制) =====
+data/
+*.nii
+*.nii.gz
+*.dcm
+*.dicom
+
+# ===== 模型权重 =====
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+
+# ===== 日志文件 =====
+logs/
+*.log
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# ===== Jupyter Notebook =====
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ===== IDE 配置 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 临时文件 =====
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# ===== 测试覆盖率 =====
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ===== 渲染输出 (可选择性忽略) =====
+# data/04_final_viz/renders/
+
+__pycache__/
+*.DS_Store
+*.dcm
+*.nii.gz
+.env

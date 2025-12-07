@@ -1,0 +1,148 @@
+# ============================================================================
+# COPD 数字孪生肺项目 - 全局配置文件
+# ============================================================================
+
+# ----- 路径配置 -----
+paths:
+  data_root: "data"
+  raw_data: "data/00_raw"
+  cleaned_data: "data/01_cleaned"
+  atlas: "data/02_atlas"
+  mapped: "data/03_mapped"
+  final_viz: "data/04_final_viz"
+  checkpoints: "checkpoints"
+  logs: "logs"
+
+# ----- 文件命名规范 -----
+naming:
+  # 格式: {type}_{patient_id:03d}.nii.gz
+  # 示例: normal_001.nii.gz, copd_001.nii.gz
+  pattern: "{type}_{patient_id:03d}.nii.gz"
+  mask_suffix: "_mask"
+  lesion_suffix: "_lesion"
+
+# ----- 数据格式约定 -----
+data_format:
+  # NIfTI 规范
+  nifti:
+    dtype: "float32"
+    affine_unit: "mm"
+  
+  # CT 值范围
+  ct:
+    min_hu: -1024
+    max_hu: 3071
+    background_hu: -1000
+    air_hu: -1000
+    water_hu: 0
+  
+  # Mask 规范
+  mask:
+    dtype: "uint8"
+    background: 0
+    foreground: 1
+
+# ----- 预处理参数 -----
+preprocessing:
+  # TotalSegmentator 参数
+  segmentation:
+    task: "lung"
+    fast_mode: false
+  
+  # LAA-950 病灶提取（优化参数 2025-12-04）
+  laa950:
+    threshold: -950  # HU 阈值
+    min_volume_mm3: 100  # 最小体素体积（增加以过滤噪声，原值 10）
+    apply_morphology: true  # 是否应用形态学清理
+    opening_radius: 1  # opening 操作半径（去除小突起）
+    closing_radius: 2  # closing 操作半径（填充小空洞）
+  
+  # 数据质量检查
+  quality_check:
+    min_slices: 100
+    max_slice_thickness_mm: 3.0
+    min_hu: -1100
+    max_hu: -200
+    min_lung_volume_ratio: 0.1
+
+# ----- 配准参数 (ANTsPy) -----
+registration:
+  # 模板构建
+  template_build:
+    type_of_transform: "SyN"
+    iteration_limit: 5
+    gradient_step: 0.2
+  
+  # 病灶配准
+  lesion_registration:
+    type_of_transform: "SyNRA"
+    reg_iterations: [100, 70, 50, 20]
+    shrink_factors: [8, 4, 2, 1]
+    smoothing_sigmas: [3, 2, 1, 0]
+
+# ----- 训练参数 -----
+training:
+  # 数据加载
+  batch_size: 4
+  num_workers: 4
+  patch_size: [64, 64, 64]
+  
+  # 优化器
+  optimizer: "Adam"
+  learning_rate: 0.0002
+  beta1: 0.5
+  beta2: 0.999
+  weight_decay: 0.0001
+  
+  # 损失函数权重
+  loss_weights:
+    reconstruction: 1.0
+    perceptual: 0.1
+    adversarial: 0.01
+  
+  # 训练控制
+  epochs: 100
+  save_frequency: 10
+  validate_frequency: 5
+  early_stopping_patience: 20
+
+# ----- 评估参数 -----
+evaluation:
+  metrics:
+    - "SSIM"
+    - "PSNR"
+    - "MSE"
+    - "Dice"
+    - "HD95"
+  
+  # 合格阈值
+  thresholds:
+    ssim_min: 0.85
+    psnr_min: 25.0
+    dice_min: 0.85
+    hd95_max: 10.0
+
+# ----- 可视化参数 -----
+visualization:
+  # 体渲染参数（优化参数 2025-12-04）
+  volume_rendering:
+    lung_opacity: 0.25  # 降低透明度，让肺更"透"（原值 0.3）
+    lesion_opacity: 0.9  # 提高病灶不透明度，更突出（原值 0.8）
+    lung_color: [0.8, 0.8, 0.8]  # 更浅的灰色（原值 0.7）
+    lesion_color: [0.9, 0.1, 0.1]  # 更鲜艳的红色
+    lung_threshold: -500  # 肺组织等值面 HU 阈值
+  
+  # 呼吸动画参数
+  breathing:
+    frequency_hz: 0.25  # 呼吸频率
+    amplitude: 0.1      # 形变幅度
+    copd_delay: 0.3     # COPD 呼气延迟
+    fps: 30
+    duration_sec: 8
+  
+  # 输出设置
+  output:
+    image_resolution: [1920, 1080]
+    video_codec: "libx264"
+    image_format: "png"
+
