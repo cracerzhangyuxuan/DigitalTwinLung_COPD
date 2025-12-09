@@ -17,26 +17,33 @@ DigitalTwinLung_COPD/
 ├── v5_1_Final.md                 # 研究课题评估与实施方案
 │
 ├── data/                         # 【数据层】 (在 .gitignore 中忽略)
-│   ├── 00_raw/                   # 原始下载数据 (只读，不动)
-│   │   ├── normal/               # LIDC-IDRI 筛选出的正常人 DICOM/NIfTI
-│   │   └── copd/                 # COPD 患者 DICOM/NIfTI
+│   ├── 00_raw/                   # 原始 NIfTI 数据 (Phase 2 后直接存储转换好的 NIfTI)
+│   │   ├── normal/               # 正常肺 CT (normal_001.nii.gz, ...)
+│   │   └── copd/                 # COPD 患者 CT (copd_001.nii.gz, ...)
+│   │   # 注: prepare_phase2_data.py 已将 DICOM 转换为 NIfTI 存入此目录
+│   │   # 不再需要 01_cleaned/*_nifti/ 中间转换目录
 │   │
-│   ├── 01_cleaned/               # 预处理后的纯净数据
-│   │   ├── normal_clean/         # 仅含肺部，背景为 -1000
-│   │   └── copd_clean/
+│   ├── 01_cleaned/               # 预处理输出 (分割 + 清理结果)
+│   │   ├── normal_mask/          # 正常肺分割 Mask (normal_001_mask.nii.gz)
+│   │   ├── normal_clean/         # 背景清理后的纯净 CT (normal_001_clean.nii.gz)
+│   │   ├── copd_mask/            # COPD 肺部 Mask (copd_001_mask.nii.gz)
+│   │   ├── copd_clean/           # COPD 背景清理后 (copd_001_clean.nii.gz)
+│   │   └── copd_emphysema/       # LAA-950 提取的肺气肿病灶 (copd_001_emphysema.nii.gz)
 │   │
 │   ├── 02_atlas/                 # 标准数字孪生底座
-│   │   ├── standard_template.nii.gz  # 最终生成的平均 CT
-│   │   └── standard_mask.nii.gz      # 对应的肺部 Mask
+│   │   ├── standard_template.nii.gz  # 最终生成的平均 CT (Phase 2 输出)
+│   │   ├── standard_mask.nii.gz      # 模板肺部 Mask (质量评估用)
+│   │   └── temp_template*.nii.gz     # 临时模板文件 (Phase 1 使用)
 │   │
 │   ├── 03_mapped/                # 配准后的中间结果
-│   │   └── patient_001/          # 按病人ID存放
+│   │   └── copd_001/             # 按病人ID存放
+│   │       ├── warped_ct.nii.gz      # 变形到标准空间的 CT
 │   │       ├── warped_lesion.nii.gz  # 变形到标准空间的病灶
-│   │       └── transform.mat         # 变形场矩阵
+│   │       └── transform*.mat        # 变形场矩阵
 │   │
 │   └── 04_final_viz/             # 最终用于可视化的融合文件
-│       ├── fused_copd_twin.nii.gz
-│       └── renders/              # 渲染输出图片
+│       ├── fused_copd_twin.nii.gz    # AI 融合后的数字孪生
+│       └── renders/              # 渲染输出图片/视频
 │
 ├── checkpoints/                  # 【模型层】 训练模型权重 (在 .gitignore 中忽略)
 │   ├── inpainting_best.pth       # 最佳模型权重
@@ -532,20 +539,25 @@ def setup_logger(
 
 ```yaml
 # config.yaml - 全局配置文件
-# 更新日期: 2025-12-02
+# 更新日期: 2025-12-09
 
 # ========================
 # 路径配置 (Path Configuration)
 # ========================
+# Phase 2 优化后的数据流：
+#   1. 00_raw/{normal,copd}/ - 存储 NIfTI 格式的 CT 数据（已由 prepare_phase2_data.py 转换）
+#   2. 01_cleaned/{normal,copd}_{mask,clean}/, copd_emphysema/ - 分割和清理结果
+#   3. 02_atlas/ - 模板输出
+#   4. 03_mapped/copd_xxx/ - 配准结果
+# 注意：已移除冗余的 *_nifti/ 中间转换目录
+# ========================
 paths:
   data_root: "data"
-  raw_normal: "data/00_raw/normal"
-  raw_copd: "data/00_raw/copd"
-  cleaned_normal: "data/01_cleaned/normal_clean"
-  cleaned_copd: "data/01_cleaned/copd_clean"
-  atlas: "data/02_atlas"
-  mapped: "data/03_mapped"
-  final_viz: "data/04_final_viz"
+  raw_data: "data/00_raw"           # 原始 NIfTI 数据 (Phase 2 后直接存储转换好的 NIfTI)
+  cleaned_data: "data/01_cleaned"   # 预处理输出 (分割 + 清理)
+  atlas: "data/02_atlas"            # 模板输出
+  mapped: "data/03_mapped"          # 配准结果
+  final_viz: "data/04_final_viz"    # 可视化输出
   checkpoints: "checkpoints"
   logs: "logs"
 

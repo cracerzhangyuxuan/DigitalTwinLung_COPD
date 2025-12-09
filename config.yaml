@@ -44,11 +44,41 @@ data_format:
 
 # ----- 预处理参数 -----
 preprocessing:
-  # TotalSegmentator 参数
+  # 肺部分割配置 (2025-12-09 更新)
   segmentation:
-    task: "lung"
-    fast_mode: false
-  
+    # 分割方法: auto, totalsegmentator, threshold
+    # - auto: 自动选择（优先 TotalSegmentator GPU，回退到 threshold）
+    # - totalsegmentator: 深度学习方法（高精度，需 GPU 和 TotalSegmentator 安装）
+    # - threshold: 阈值方法（轻量 CPU，用于无 GPU 环境）
+    method: "auto"
+
+    # 设备配置: gpu, cpu, cuda:0, cuda:1 等
+    device: "gpu"
+
+    # TotalSegmentator 特定参数
+    totalsegmentator:
+      task: "lung"               # 分割任务类型
+      fast_mode: false           # 快速模式（精度略低，速度快 5 倍）
+      roi_subset:                # 分割的肺叶子集
+        - "lung_upper_lobe_left"
+        - "lung_lower_lobe_left"
+        - "lung_upper_lobe_right"
+        - "lung_middle_lobe_right"
+        - "lung_lower_lobe_right"
+
+    # 阈值方法参数
+    threshold:
+      lower_hu: -1000            # 下限阈值 (HU)
+      upper_hu: -300             # 上限阈值 (HU)
+      min_lung_size: 500000      # 最小肺体积（体素数）
+      max_lung_ratio: 0.40       # 肺最大占比（相对于整个 CT）
+      min_lung_ratio: 0.03       # 肺最小占比
+
+    # 输出配置
+    output:
+      background_hu: -1000       # 背景填充 HU 值
+      mask_dtype: "uint8"        # mask 数据类型
+
   # LAA-950 病灶提取（优化参数 2025-12-04）
   laa950:
     threshold: -950  # HU 阈值
@@ -56,7 +86,7 @@ preprocessing:
     apply_morphology: true  # 是否应用形态学清理
     opening_radius: 1  # opening 操作半径（去除小突起）
     closing_radius: 2  # closing 操作半径（填充小空洞）
-  
+
   # 数据质量检查
   quality_check:
     min_slices: 100
