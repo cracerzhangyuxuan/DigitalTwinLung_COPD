@@ -48,6 +48,7 @@ Phase 2: Atlas Construction - 标准底座构建入口脚本
 
 import sys
 import argparse
+import importlib
 from pathlib import Path
 from datetime import datetime
 
@@ -55,73 +56,78 @@ from datetime import datetime
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-
 def check_prerequisites():
     """检查运行前提条件"""
     print("=" * 70)
     print("Phase 2: Atlas Construction - 环境检查")
     print("=" * 70)
-    
+
     errors = []
     warnings = []
-    
+    all_ok = True
+
     # 检查 ANTsPy
     try:
         import ants
-        print(f"✅ ANTsPy 版本: {ants.__version__ if hasattr(ants, '__version__') else '已安装'}")
+        print(f"  ✓ ANTsPy: {getattr(ants, '__version__', 'unknown')}")
     except ImportError:
-        errors.append("❌ ANTsPy 未安装。请运行: pip install antspyx")
-    
+        errors.append("❌ ANTsPy 未安装")
+        all_ok = False
+
     # 检查 nibabel
     try:
-        import nibabel
-        print(f"✅ nibabel 版本: {nibabel.__version__}")
+        import nibabel as nib
+        print(f"  ✓ nibabel: {nib.__version__}")
     except ImportError:
-        errors.append("❌ nibabel 未安装。请运行: pip install nibabel")
-    
+        errors.append("❌ nibabel 未安装")
+        all_ok = False
+
     # 检查 numpy
     try:
-        import numpy
-        print(f"✅ numpy 版本: {numpy.__version__}")
+        import numpy as np
+        print(f"  ✓ numpy: {np.__version__}")
     except ImportError:
-        errors.append("❌ numpy 未安装。请运行: pip install numpy")
-    
-    # 检查 scipy
+        errors.append("❌ numpy 未安装")
+        all_ok = False
+
+    # 检查 scipy（可选）
     try:
         import scipy
-        print(f"✅ scipy 版本: {scipy.__version__}")
+        print(f"  ✓ scipy: {scipy.__version__}")
     except ImportError:
         warnings.append("⚠️ scipy 未安装，形态学操作将被跳过")
-    
+
     # 检查输入数据
     input_dir = project_root / "data" / "01_cleaned" / "normal_clean"
     if input_dir.exists():
         files = list(input_dir.glob("*.nii.gz"))
         if len(files) >= 2:
-            print(f"✅ 输入数据: {len(files)} 个 NIfTI 文件")
+            print(f"  ✓ 输入数据: {len(files)} 个 NIfTI 文件")
         else:
             errors.append(f"❌ 输入数据不足: 需要至少 2 个文件，当前 {len(files)} 个")
+            all_ok = False
     else:
         errors.append(f"❌ 输入目录不存在: {input_dir}")
-    
+        all_ok = False
+
     # 检查输出目录
     output_dir = project_root / "data" / "02_atlas"
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"✅ 输出目录: {output_dir}")
-    
+    print(f"  ✓ 输出目录: {output_dir}")
+
     # 检查 config.yaml
     config_path = project_root / "config.yaml"
     if config_path.exists():
-        print(f"✅ 配置文件: {config_path}")
+        print(f"  ✓ 配置文件: {config_path}")
     else:
         warnings.append(f"⚠️ 配置文件不存在，将使用默认参数")
-    
+
     print()
-    
+
     # 输出警告
     for w in warnings:
         print(w)
-    
+
     # 输出错误
     if errors:
         print()
@@ -130,25 +136,131 @@ def check_prerequisites():
         print()
         print("请修复上述错误后重新运行。")
         return False
-    
+
     print()
-    return True
+    return all_ok
 
 
 def estimate_runtime(num_images: int, quick_test: bool = False) -> str:
     """估算运行时间"""
     if quick_test:
         return "10-30 分钟"
-    
+
     # 基于经验估算：每个图像大约需要 10-20 分钟配准
     # 迭代次数默认为 5
     min_hours = num_images * 0.15  # 每个图像 9 分钟
     max_hours = num_images * 0.30  # 每个图像 18 分钟
-    
+
     if min_hours < 1:
         return f"{int(min_hours * 60)}-{int(max_hours * 60)} 分钟"
     else:
         return f"{min_hours:.1f}-{max_hours:.1f} 小时"
+
+
+def generate_template_visualization(template_path, mask_path=None):
+    """
+    生成模板的 3D 体渲染可视化图片（多视角）
+
+    使用 PyVista 生成 X/Y/Z 三个视角的 3D 体渲染图像，
+    与 run_mvp_pipeline.py 中的 step6_visualize() 方法一致。
+
+    Args:
+        template_path: 模板 CT 文件路径
+        mask_path: 模板肺部 mask 文件路径（可选，用于渲染）
+    """
+    if template_path is None:
+        print("⚠️  未指定模板路径，跳过可视化")
+        return
+
+    template_path = Path(template_path)
+    if not template_path.exists():
+        print(f"⚠️  模板文件不存在: {template_path}")
+        return
+
+    print("\n📊 生成模板 3D 体渲染图片...")
+
+    # 查找 mask 路径 - 使用正式流程生成的 standard_mask.nii.gz
+    if mask_path is None:
+        # standard_mask.nii.gz 是正式流程的输出：
+        #   - 正式模式：由 generate_template_mask_from_inputs() 生成（配准投票法，高精度）
+        #   - 快速测试模式：由 generate_template_mask() 生成（阈值法，低精度）
+        mask_candidates = [
+            template_path.parent / "standard_mask.nii.gz",
+            template_path.parent / "template_mask.nii.gz",
+            template_path.with_name(template_path.stem.replace('.nii', '') + "_mask.nii.gz"),
+        ]
+        for candidate in mask_candidates:
+            if candidate.exists():
+                mask_path = candidate
+                print(f"   使用 mask: {mask_path.name}")
+                break
+
+    if mask_path is None or not Path(mask_path).exists():
+        print("⚠️  未找到模板 mask，尝试从输入 mask 生成...")
+        # 尝试使用第一个输入 mask 作为参考
+        try:
+            input_mask_dir = project_root / "data" / "01_cleaned" / "normal_mask"
+            input_masks = sorted(input_mask_dir.glob("*.nii.gz"))
+            if input_masks:
+                # 使用第一个输入 mask 作为临时 mask
+                import shutil
+                mask_path = template_path.parent / "visualizations" / "temp_mask.nii.gz"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(input_masks[0], mask_path)
+                print(f"   已复制第一个输入 mask: {input_masks[0].name}")
+            else:
+                # 最后才使用阈值法
+                print("⚠️  未找到输入 mask，使用阈值方法生成临时 mask")
+                import numpy as np
+                import importlib
+                io_module = importlib.import_module("src.utils.io")
+                load_nifti = io_module.load_nifti
+                save_nifti = io_module.save_nifti
+
+                ct_data = load_nifti(template_path)
+                # 使用更严格的阈值分割
+                temp_mask = ((ct_data > -900) & (ct_data < -400)).astype(np.uint8)
+                mask_path = template_path.parent / "visualizations" / "temp_mask.nii.gz"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                save_nifti(temp_mask, mask_path)
+                print(f"   已创建临时 mask: {mask_path}")
+        except Exception as e:
+            print(f"⚠️  创建临时 mask 失败: {e}")
+            return
+
+    try:
+        import importlib
+        vis_module = importlib.import_module("src.05_visualization.static_render")
+        render_template_only = vis_module.render_template_only
+
+        output_dir = template_path.parent / "visualizations"
+
+        # 使用 3D 体渲染生成多视角图片
+        success = render_template_only(
+            ct_path=template_path,
+            lung_mask_path=mask_path,
+            output_prefix="template",
+            output_dir=output_dir,
+            lung_color=(0.8, 0.8, 0.8),
+            lung_opacity=0.3,
+            window_size=(1920, 1080),
+            use_mask_surface=True
+        )
+
+        if success:
+            print("✅ 3D 体渲染图片已生成:")
+            for view in ['x', 'y', 'z']:
+                output_path = output_dir / f"template_view_{view}.png"
+                if output_path.exists():
+                    print(f"   - {output_path}")
+        else:
+            print("⚠️  3D 体渲染生成失败")
+
+    except ImportError as e:
+        print(f"⚠️  无法导入可视化模块: {e}")
+        print("   请确保已安装 PyVista: pip install pyvista")
+    except Exception as e:
+        print(f"⚠️  生成 3D 体渲染时出错: {e}")
 
 
 def main():
@@ -257,22 +369,29 @@ def main():
             skip_evaluation=args.skip_eval,
             quick_test=args.quick_test
         )
-        
+
         end_time = datetime.now()
         duration = end_time - start_time
-        
+
         print(f"\n结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"实际耗时: {duration}")
-        
+
         if result.get('success'):
             print("\n✅ Phase 2 成功完成!")
             print(f"   模板: {result.get('template_path')}")
             print(f"   Mask: {result.get('mask_path')}")
+
+            # 生成模板 3D 体渲染图片
+            generate_template_visualization(
+                result.get('template_path'),
+                mask_path=result.get('mask_path')
+            )
+
             sys.exit(0)
         else:
             print(f"\n❌ Phase 2 失败: {result.get('error', '未知错误')}")
             sys.exit(1)
-            
+
     except Exception as e:
         import traceback
         print(f"\n❌ 运行失败: {e}")

@@ -34,34 +34,56 @@ Phase 2 端到端流水线（数字孪生底座构建）
 import os
 import sys
 import argparse
-import subprocess
+import importlib
 import time
 import json
 from pathlib import Path
 from datetime import datetime
 from typing import Tuple, List, Dict, Optional
+import logging
 
 import yaml
 import numpy as np
 
+# 添加项目根目录到路径
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+# 导入公共模块
+run_seg_module = importlib.import_module("src.01_preprocessing.run_segmentation")
+check_gpu = run_seg_module.check_gpu_available
+check_totalsegmentator = run_seg_module.check_totalsegmentator_available
+
+# ANTsPy 检查函数
+def check_antspy():
+    """检查 ANTsPy 是否可用"""
+    try:
+        import ants
+        return True, f"ANTsPy 可用: {getattr(ants, '__version__', 'unknown')}"
+    except ImportError:
+        return False, "ANTsPy 未安装"
+
 # =============================================================================
 # 日志配置
 # =============================================================================
-import logging
 
 def setup_logging(log_dir: Path = None) -> logging.Logger:
     """配置日志"""
     if log_dir is None:
         log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"phase2_pipeline_{timestamp}.log"
-    
+
     # 创建 logger
     logger = logging.getLogger("Phase2Pipeline")
     logger.setLevel(logging.DEBUG)
-    
+
+    # 清除已有的处理器（避免重复添加）
+    if logger.handlers:
+        logger.handlers.clear()
+
     # 文件处理器
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
@@ -70,7 +92,7 @@ def setup_logging(log_dir: Path = None) -> logging.Logger:
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     file_handler.setFormatter(file_formatter)
-    
+
     # 控制台处理器
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
@@ -79,57 +101,17 @@ def setup_logging(log_dir: Path = None) -> logging.Logger:
         datefmt='%H:%M:%S'
     )
     console_handler.setFormatter(console_formatter)
-    
+
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    
+
     logger.info(f"日志文件: {log_file}")
     return logger
 
 
 # =============================================================================
-# 环境检查
+# 环境检查（使用公共模块中的函数）
 # =============================================================================
-
-def check_gpu() -> Tuple[bool, str]:
-    """检查 GPU 可用性"""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_count = torch.cuda.device_count()
-            memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-            return True, f"{gpu_count} GPU(s): {gpu_name}, {memory:.1f} GB"
-        return False, "CUDA 不可用"
-    except ImportError:
-        return False, "PyTorch 未安装"
-
-
-def check_totalsegmentator() -> Tuple[bool, str]:
-    """检查 TotalSegmentator 可用性"""
-    try:
-        result = subprocess.run(
-            ["TotalSegmentator", "--version"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            version = result.stdout.strip() or result.stderr.strip()
-            return True, f"版本 {version}"
-        return False, "命令执行失败"
-    except FileNotFoundError:
-        return False, "未安装"
-    except subprocess.TimeoutExpired:
-        return False, "响应超时"
-
-
-def check_antspy() -> Tuple[bool, str]:
-    """检查 ANTsPy 可用性"""
-    try:
-        import ants
-        return True, f"版本 {ants.__version__}"
-    except ImportError:
-        return False, "未安装"
-
 
 def run_environment_check(logger: logging.Logger) -> bool:
     """运行环境检查"""
@@ -212,12 +194,7 @@ def run_segmentation(config: dict, logger: logging.Logger,
     logger.info("=" * 60)
     
     # 导入分割模块
-    try:
-        from src.preprocessing import simple_lung_segment
-    except ImportError:
-        # 尝试动态导入
-        import importlib
-        simple_lung_segment = importlib.import_module("src.01_preprocessing.simple_lung_segment")
+    simple_lung_segment = importlib.import_module("src.01_preprocessing.simple_lung_segment")
     
     raw_dir = Path(config['paths']['raw_data'])
     cleaned_dir = Path(config['paths']['cleaned_data'])
@@ -385,11 +362,12 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
     start_time = time.time()
 
     try:
-        result = build_module.build_template(
-            input_dir=input_dir,
-            output_dir=atlas_dir,
-            max_subjects=max_subjects,
-            n_iterations=n_iterations
+        # 使用 main() 函数而不是 build_template()，因为 main() 提供完整的流程
+        result = build_module.main(
+            config=config,
+            num_images=max_subjects,
+            skip_evaluation=False,
+            quick_test=quick_test
         )
 
         elapsed = time.time() - start_time
@@ -397,13 +375,14 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
         logger.info(f"  耗时: {elapsed/60:.1f} 分钟")
 
         # 检查输出
-        template_file = atlas_dir / "standard_template.nii.gz"
-        if template_file.exists():
-            size_mb = template_file.stat().st_size / 1e6
-            logger.info(f"  模板文件: {template_file.name} ({size_mb:.1f} MB)")
+        if result.get('success'):
+            template_file = Path(result.get('template_path', ''))
+            if template_file.exists():
+                size_mb = template_file.stat().st_size / 1e6
+                logger.info(f"  模板文件: {template_file.name} ({size_mb:.1f} MB)")
             return True
         else:
-            logger.error("模板文件未生成")
+            logger.error(f"模板构建失败: {result.get('error', '未知错误')}")
             return False
 
     except Exception as e:
@@ -428,7 +407,7 @@ def run_result_validation(config: dict, logger: logging.Logger) -> bool:
     # 检查必要文件
     required_files = [
         "standard_template.nii.gz",
-        "template_mask.nii.gz",
+        "standard_mask.nii.gz",  # 修正：实际生成的文件名是 standard_mask.nii.gz
     ]
 
     optional_files = [

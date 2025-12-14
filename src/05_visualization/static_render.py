@@ -657,8 +657,8 @@ def render_template_only(
     logger.info(f"  CT 形状: {ct_data.shape}")
     logger.info(f"  肺 mask: {np.sum(lung_mask > 0):,} 体素")
 
-    # 清理 mask
-    lung_mask_binary = clean_lung_mask(lung_mask, keep_largest_n=1).astype(float)
+    # 清理 mask - 保留左右肺两个连通分量
+    lung_mask_binary = clean_lung_mask(lung_mask, keep_largest_n=2).astype(float)
 
     # 创建网格
     spacing = (1, 1, 1)
@@ -712,6 +712,157 @@ def render_template_only(
     return True
 
 
+def generate_slice_visualization(
+    nifti_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    prefix: str = "template",
+    window_center: float = -600,
+    window_width: float = 1500,
+    figsize: Tuple[int, int] = (10, 10),
+    dpi: int = 150,
+    cmap: str = "gray"
+) -> List[Path]:
+    """
+    生成 NIfTI 文件的三轴切片可视化图像
+
+    从 X、Y、Z 三个轴向分别生成中心切片的 PNG 图像，
+    使用指定的窗宽窗位设置（默认为肺窗）。
+
+    Args:
+        nifti_path: NIfTI 文件路径
+        output_dir: 输出目录
+        prefix: 文件名前缀
+        window_center: 窗位（默认 -600 HU，肺窗）
+        window_width: 窗宽（默认 1500 HU）
+        figsize: 图像尺寸
+        dpi: 图像分辨率
+        cmap: 颜色映射（默认灰度）
+
+    Returns:
+        output_paths: 生成的 PNG 文件路径列表
+
+    Example:
+        >>> paths = generate_slice_visualization(
+        ...     "data/02_atlas/standard_template.nii.gz",
+        ...     "data/02_atlas/visualizations",
+        ...     prefix="template"
+        ... )
+        >>> print(paths)
+        ['template_axial.png', 'template_coronal.png', 'template_sagittal.png']
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # 非 GUI 后端
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.error("matplotlib 未安装，请运行: pip install matplotlib")
+        return []
+
+    nifti_path = Path(nifti_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not nifti_path.exists():
+        logger.error(f"文件不存在: {nifti_path}")
+        return []
+
+    # 加载数据
+    data = load_nifti(nifti_path)
+    logger.info(f"加载数据: {nifti_path.name}")
+    logger.info(f"  形状: {data.shape}")
+    logger.info(f"  HU 范围: [{data.min():.0f}, {data.max():.0f}]")
+
+    # 计算窗宽窗位的显示范围
+    vmin = window_center - window_width / 2
+    vmax = window_center + window_width / 2
+
+    # 定义三个轴向的切片
+    slices_info = [
+        {
+            "name": "axial",
+            "title": "Axial View (Z-axis)",
+            "axis": 2,
+            "xlabel": "X (Left -> Right)",
+            "ylabel": "Y (Posterior -> Anterior)"
+        },
+        {
+            "name": "coronal",
+            "title": "Coronal View (Y-axis)",
+            "axis": 1,
+            "xlabel": "X (Left -> Right)",
+            "ylabel": "Z (Inferior -> Superior)"
+        },
+        {
+            "name": "sagittal",
+            "title": "Sagittal View (X-axis)",
+            "axis": 0,
+            "xlabel": "Y (Posterior -> Anterior)",
+            "ylabel": "Z (Inferior -> Superior)"
+        }
+    ]
+
+    output_paths = []
+
+    for info in slices_info:
+        # 获取中心切片索引
+        axis = info["axis"]
+        center_idx = data.shape[axis] // 2
+
+        # 提取切片
+        if axis == 0:
+            slice_data = data[center_idx, :, :]
+        elif axis == 1:
+            slice_data = data[:, center_idx, :]
+        else:  # axis == 2
+            slice_data = data[:, :, center_idx]
+
+        # 对于冠状面和矢状面，需要旋转以正确显示
+        if axis in [1, 2]:
+            slice_data = np.rot90(slice_data)
+
+        # 创建图像
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+
+        im = ax.imshow(
+            slice_data,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            aspect='equal'
+        )
+
+        # 添加颜色条
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8, label='HU')
+
+        # 添加标题和标签
+        ax.set_title(f"{info['title']}\nSlice {center_idx}/{data.shape[axis]}", fontsize=14)
+        ax.set_xlabel(info['xlabel'], fontsize=11)
+        ax.set_ylabel(info['ylabel'], fontsize=11)
+
+        # 添加窗宽窗位信息
+        ax.text(
+            0.02, 0.98,
+            f"Window: C={window_center:.0f} W={window_width:.0f}",
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+        )
+
+        plt.tight_layout()
+
+        # 保存
+        output_path = output_dir / f"{prefix}_{info['name']}.png"
+        plt.savefig(output_path, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.close(fig)
+
+        output_paths.append(output_path)
+        logger.info(f"  ✅ 已保存: {output_path}")
+
+    logger.info(f"切片可视化完成: 共 {len(output_paths)} 张图像")
+    return output_paths
+
+
 def main(config: dict) -> None:
     """主函数"""
     paths = config.get('paths', {})
@@ -724,9 +875,9 @@ def main(config: dict) -> None:
 
 if __name__ == "__main__":
     import yaml
-    
+
     with open("config.yaml", 'r') as f:
         config = yaml.safe_load(f)
-    
+
     main(config)
 

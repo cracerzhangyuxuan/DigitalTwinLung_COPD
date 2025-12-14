@@ -16,13 +16,17 @@ from .metrics import compute_ssim, compute_dice, compute_psnr
 from .data_quality import check_ct_quality
 
 __all__ = [
+    # IO
     'load_nifti',
     'save_nifti',
+    # Logger
     'setup_logger',
     'get_logger',
+    # Metrics
     'compute_ssim',
     'compute_dice',
     'compute_psnr',
+    # Data Quality
     'check_ct_quality',
 ]
 
