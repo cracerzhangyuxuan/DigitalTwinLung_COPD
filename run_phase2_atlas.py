@@ -8,16 +8,20 @@ Phase 2: Atlas Construction - 标准底座构建入口脚本
 使用方法：
     # 默认运行（使用所有可用的正常肺数据）
     python run_phase2_atlas.py
-    
+
     # 指定使用 20 例数据
     python run_phase2_atlas.py --num-images 20
-    
+
     # 快速测试模式（使用 3 例数据，2 次迭代）
     python run_phase2_atlas.py --quick-test
-    
+
     # 跳过质量评估
     python run_phase2_atlas.py --skip-eval
-    
+
+    # 跳过 Step 1（模板构建），直接从 Step 2 开始
+    # 适用于模板已存在，只需重新生成 mask 的情况
+    python run_phase2_atlas.py --skip-step1
+
     # 服务器后台运行
     nohup python run_phase2_atlas.py > logs/phase2_atlas.log 2>&1 &
 
@@ -48,7 +52,6 @@ Phase 2: Atlas Construction - 标准底座构建入口脚本
 
 import sys
 import argparse
-import importlib
 from pathlib import Path
 from datetime import datetime
 
@@ -273,6 +276,7 @@ def main():
   python run_phase2_atlas.py --num-images 20   # 使用 20 例数据
   python run_phase2_atlas.py --quick-test      # 快速测试模式
   python run_phase2_atlas.py --skip-eval       # 跳过质量评估
+  python run_phase2_atlas.py --skip-step1      # 跳过模板构建，从 Step 2 开始
         """
     )
     
@@ -287,6 +291,10 @@ def main():
     parser.add_argument(
         '--skip-eval', action='store_true',
         help='跳过质量评估步骤'
+    )
+    parser.add_argument(
+        '--skip-step1', action='store_true',
+        help='跳过 Step 1（模板构建），直接从 Step 2 开始（需要已存在 standard_template.nii.gz）'
     )
     parser.add_argument(
         '--config', type=str, default='config.yaml',
@@ -323,12 +331,30 @@ def main():
     print(f"  使用图像数量: {num_to_use}")
     print(f"  快速测试模式: {'是' if args.quick_test else '否'}")
     print(f"  跳过质量评估: {'是' if args.skip_eval else '否'}")
-    print(f"  预计运行时间: {estimated_time}")
+    print(f"  跳过模板构建: {'是' if args.skip_step1 else '否'}")
+    if args.skip_step1:
+        print(f"  预计运行时间: 5-30 分钟（仅 Step 2 + Step 3）")
+    else:
+        print(f"  预计运行时间: {estimated_time}")
     print("=" * 70)
     print()
-    
+
+    # 如果跳过 Step 1，检查模板文件是否存在
+    if args.skip_step1:
+        template_file = project_root / "data" / "02_atlas" / "standard_template.nii.gz"
+        if not template_file.exists():
+            print("❌ 错误: 无法跳过 Step 1，因为模板文件不存在!")
+            print(f"   期望路径: {template_file}")
+            print("   请先运行完整的 Atlas 构建（不带 --skip-step1 参数）")
+            sys.exit(1)
+        else:
+            print(f"✓ 找到已有模板: {template_file}")
+            file_size_mb = template_file.stat().st_size / (1024 * 1024)
+            print(f"  文件大小: {file_size_mb:.1f} MB")
+            print()
+
     # 确认运行
-    if not args.quick_test:
+    if not args.quick_test and not args.skip_step1:
         print("⚠️  Atlas 构建是一个长时间任务，建议在服务器上使用后台运行。")
         print("    示例: nohup python run_phase2_atlas.py > logs/phase2.log 2>&1 &")
         print()
@@ -367,7 +393,8 @@ def main():
             config=config,
             num_images=args.num_images,
             skip_evaluation=args.skip_eval,
-            quick_test=args.quick_test
+            quick_test=args.quick_test,
+            skip_template_build=args.skip_step1
         )
 
         end_time = datetime.now()

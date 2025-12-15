@@ -621,7 +621,8 @@ def main(
     config: Optional[Dict] = None,
     num_images: Optional[int] = None,
     skip_evaluation: bool = False,
-    quick_test: bool = False
+    quick_test: bool = False,
+    skip_template_build: bool = False
 ) -> Dict:
     """
     主函数 - 从配置运行完整的 Atlas 构建流程
@@ -631,6 +632,7 @@ def main(
         num_images: 使用的图像数量，如果为 None 则使用所有可用图像
         skip_evaluation: 是否跳过质量评估步骤
         quick_test: 快速测试模式（使用较少迭代和图像）
+        skip_template_build: 是否跳过 Step 1（模板构建），直接从 Step 2 开始
 
     Returns:
         result: 包含模板路径、mask 路径、验证结果等
@@ -670,7 +672,9 @@ def main(
     logger.info("Phase 2: Atlas Construction - 标准底座构建")
     logger.info("=" * 70)
     logger.info(f"输入目录: {input_dir}")
+    logger.info(f"Mask 目录: {mask_dir}")
     logger.info(f"发现 {len(image_paths)} 个输入图像")
+    logger.info(f"发现 {len(mask_paths)} 个输入 mask")
     logger.info(f"输出目录: {output_dir}")
 
     if len(image_paths) < 2:
@@ -694,27 +698,47 @@ def main(
     total_start = time.time()
 
     # Step 1: 构建模板
-    logger.info("")
-    logger.info("Step 1/3: 构建标准模板...")
-    try:
-        build_template(
-            image_paths=image_paths,
-            output_path=template_path,
-            type_of_transform=atlas_config.get('type_of_transform', 'SyN'),
-            iteration_limit=iteration_limit,
-            gradient_step=atlas_config.get('gradient_step', 0.2),
-        )
-    except Exception as e:
-        logger.error(f"模板构建失败: {e}")
-        return {'success': False, 'error': str(e)}
+    if skip_template_build:
+        logger.info("")
+        logger.info("Step 1/3: 跳过模板构建（使用已有模板）...")
+        if not template_path.exists():
+            error_msg = f"模板文件不存在: {template_path}\n请先运行完整的 Atlas 构建（不带 --skip-step1 参数）"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
+        logger.info(f"✓ 找到已有模板: {template_path}")
+        # 获取模板信息
+        try:
+            import ants
+            template = ants.image_read(str(template_path))
+            logger.info(f"  模板形状: {template.shape}")
+            logger.info(f"  模板间距: {template.spacing}")
+        except Exception as e:
+            logger.warning(f"  无法读取模板信息: {e}")
+    else:
+        logger.info("")
+        logger.info("Step 1/3: 构建标准模板...")
+        try:
+            build_template(
+                image_paths=image_paths,
+                output_path=template_path,
+                type_of_transform=atlas_config.get('type_of_transform', 'SyN'),
+                iteration_limit=iteration_limit,
+                gradient_step=atlas_config.get('gradient_step', 0.2),
+            )
+        except Exception as e:
+            logger.error(f"模板构建失败: {e}")
+            return {'success': False, 'error': str(e)}
 
     # Step 2: 生成模板 mask
     logger.info("")
     logger.info("Step 2/3: 生成模板肺部 mask...")
+    logger.info(f"  template_path 类型: {type(template_path).__name__}, 值: {template_path}")
+    logger.info(f"  mask_path 类型: {type(mask_path).__name__}, 值: {mask_path}")
+    logger.info(f"  quick_test: {quick_test}, mask_paths 数量: {len(mask_paths)}")
     try:
         # 优先使用输入 mask 配准生成（更精确），快速测试时用阈值分割（更快）
         if not quick_test and len(mask_paths) >= 3:
-            logger.info("使用输入 mask 配准生成（高精度模式）...")
+            logger.info("✓ 条件满足: 使用输入 mask 配准生成（高精度模式）...")
             generate_template_mask_from_inputs(
                 template_path=template_path,
                 input_image_paths=image_paths[:min(5, len(image_paths))],  # 最多用 5 个
@@ -722,13 +746,18 @@ def main(
                 output_mask_path=mask_path
             )
         else:
-            logger.info("使用阈值分割生成（快速模式）...")
+            if quick_test:
+                logger.info("✓ 快速测试模式: 使用阈值分割生成...")
+            else:
+                logger.warning(f"⚠ mask 文件不足 ({len(mask_paths)} < 3): 使用阈值分割生成...")
             generate_template_mask(
                 template_path=template_path,
                 output_mask_path=mask_path
             )
     except Exception as e:
         logger.error(f"Mask 生成失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {'success': False, 'error': str(e)}
 
     # Step 3: 验证 Atlas
