@@ -22,7 +22,7 @@ Phase 2 端到端流水线（数字孪生底座构建）
     python run_phase2_pipeline.py --skip-segmentation
 
     # 仅运行分割（Step 1）
-    python run_phase2_pipeline.py --step1-only
+    python run_phase2_pipeline.py --step1-only --device gpu
 
     # 仅生成气管树模板（Step 2，需要已有模板）
     python run_phase2_pipeline.py --step2-only

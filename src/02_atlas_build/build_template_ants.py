@@ -603,11 +603,13 @@ def evaluate_template_quality(
         try:
             img = ants.image_read(str(path))
 
-            # 配准到模板
+            # 配准到模板（使用 SyN 非线性配准，与模板构建一致）
+            # 注意：必须使用与 build_template() 和 generate_template_mask_from_inputs()
+            # 相同的配准类型，否则 Dice 会显著偏低
             registration = ants.registration(
                 fixed=template,
                 moving=img,
-                type_of_transform='Rigid'
+                type_of_transform='SyN'  # 改为 SyN，与模板构建保持一致
             )
 
             warped = registration['warpedmovout']
@@ -857,7 +859,13 @@ def main(
 
     # 获取所有输入图像
     image_paths = sorted(list(input_dir.glob('*.nii.gz')))
-    mask_paths = sorted(list(mask_dir.glob('*_mask.nii.gz'))) if mask_dir.exists() else []
+
+    # 获取肺部 mask（排除气管树 mask 和肺叶标签 mask）
+    # 肺部 mask 命名格式: *_mask.nii.gz（不包含 trachea 或 lung_lobes）
+    all_mask_files = sorted(list(mask_dir.glob('*_mask.nii.gz'))) if mask_dir.exists() else []
+    mask_paths = [p for p in all_mask_files
+                  if not p.name.endswith('_trachea_mask.nii.gz')
+                  and 'lung_lobes' not in p.name]
 
     # 获取气管树 mask（如果存在）
     trachea_mask_paths = sorted(list(mask_dir.glob('*_trachea_mask.nii.gz'))) if mask_dir.exists() else []
@@ -934,12 +942,31 @@ def main(
         # 优先使用输入 mask 配准生成（更精确），快速测试时用阈值分割（更快）
         if not quick_test and len(mask_paths) >= 3:
             logger.info("✓ 条件满足: 使用输入 mask 配准生成（高精度模式）...")
-            generate_template_mask_from_inputs(
-                template_path=template_path,
-                input_image_paths=image_paths[:min(5, len(image_paths))],
-                input_mask_paths=mask_paths[:min(5, len(mask_paths))],
-                output_mask_path=mask_path
-            )
+
+            # 构建 image 和 mask 的对应关系
+            selected_images = []
+            selected_masks = []
+            for img_path in image_paths[:min(5, len(image_paths))]:
+                img_stem = img_path.stem.replace('.nii', '')
+                sample_id = img_stem.replace('_clean', '')
+                expected_mask = mask_dir / f"{sample_id}_mask.nii.gz"
+                if expected_mask.exists():
+                    selected_images.append(img_path)
+                    selected_masks.append(expected_mask)
+
+            if len(selected_images) >= 3:
+                generate_template_mask_from_inputs(
+                    template_path=template_path,
+                    input_image_paths=selected_images,
+                    input_mask_paths=selected_masks,
+                    output_mask_path=mask_path
+                )
+            else:
+                logger.warning(f"⚠ 配对的 mask 不足: 使用阈值分割生成...")
+                generate_template_mask(
+                    template_path=template_path,
+                    output_mask_path=mask_path
+                )
         else:
             if quick_test:
                 logger.info("✓ 快速测试模式: 使用阈值分割生成...")
@@ -993,7 +1020,26 @@ def main(
 
         # 抽取 3 个样本进行评估
         eval_images = image_paths[:3]
-        eval_masks = mask_paths[:3] if len(mask_paths) >= 3 else None
+
+        # 为每个 image 找到对应的 mask（基于文件名匹配）
+        eval_masks = []
+        for img_path in eval_images:
+            # 从 normal_001_clean.nii.gz 提取 normal_001
+            img_stem = img_path.stem.replace('.nii', '')  # normal_001_clean
+            sample_id = img_stem.replace('_clean', '')    # normal_001
+
+            # 查找对应的 mask: normal_001_mask.nii.gz
+            expected_mask_name = f"{sample_id}_mask.nii.gz"
+            matching_mask = mask_dir / expected_mask_name
+
+            if matching_mask.exists():
+                eval_masks.append(matching_mask)
+            else:
+                logger.warning(f"未找到对应的 mask: {expected_mask_name}")
+
+        if len(eval_masks) != len(eval_images):
+            logger.warning(f"mask 数量不匹配: {len(eval_masks)} vs {len(eval_images)}，使用阈值分割")
+            eval_masks = None
 
         # 快速测试使用较低阈值，正常运行使用 0.85
         dice_threshold = 0.50 if quick_test else 0.85
