@@ -485,6 +485,130 @@ def generate_template_trachea_mask(
     return output_trachea_path
 
 
+def generate_template_lung_lobes(
+    template_path: Union[str, Path],
+    input_image_paths: List[Union[str, Path]],
+    input_lobes_paths: List[Union[str, Path]],
+    output_lobes_path: Union[str, Path],
+    threshold: float = 0.3
+) -> Optional[Path]:
+    """
+    使用输入的肺叶标签 mask 配准后投票生成模板肺叶标签 mask
+
+    标签定义:
+        1 = 左上叶 (Left Upper Lobe)
+        2 = 左下叶 (Left Lower Lobe)
+        3 = 右上叶 (Right Upper Lobe)
+        4 = 右中叶 (Right Middle Lobe)
+        5 = 右下叶 (Right Lower Lobe)
+
+    Args:
+        template_path: 模板 CT 路径
+        input_image_paths: 输入图像路径列表
+        input_lobes_paths: 输入肺叶标签 mask 路径列表
+        output_lobes_path: 输出肺叶标签模板路径
+        threshold: 投票阈值（默认 0.3，因为边界区域可能重叠）
+
+    Returns:
+        output_lobes_path: 生成的肺叶模板路径，失败返回 None
+    """
+    if not check_ants_available():
+        raise ImportError("ANTsPy 不可用")
+
+    logger.info("=" * 60)
+    logger.info("生成模板肺叶标签 mask...")
+    logger.info(f"  输入图像数: {len(input_image_paths)}")
+    logger.info(f"  输入肺叶标签数: {len(input_lobes_paths)}")
+    logger.info("=" * 60)
+
+    if len(input_lobes_paths) == 0:
+        logger.warning("没有输入肺叶标签 mask，跳过生成")
+        return None
+
+    template = ants.image_read(str(template_path))
+    template_shape = template.shape
+
+    # 为每个肺叶标签（1-5）累积投票
+    lobe_accumulators = {i: np.zeros(template_shape, dtype=np.float32) for i in range(1, 6)}
+    valid_count = 0
+
+    for i, (img_path, lobes_path) in enumerate(zip(input_image_paths, input_lobes_paths)):
+        img_path = Path(img_path)
+        lobes_path = Path(lobes_path)
+
+        if not img_path.exists() or not lobes_path.exists():
+            logger.warning(f"  [{i+1}] 文件缺失，跳过")
+            continue
+
+        try:
+            img = ants.image_read(str(img_path))
+            lobes_mask = ants.image_read(str(lobes_path))
+
+            logger.info(f"  [{i+1}/{len(input_image_paths)}] 配准: {img_path.name}")
+            registration = ants.registration(
+                fixed=template,
+                moving=img,
+                type_of_transform='SyN'
+            )
+
+            # 对每个肺叶标签分别变换
+            for label in range(1, 6):
+                # 提取单个标签
+                label_mask_data = (lobes_mask.numpy() == label).astype(np.float32)
+                label_mask = ants.from_numpy(label_mask_data, origin=lobes_mask.origin,
+                                             spacing=lobes_mask.spacing, direction=lobes_mask.direction)
+
+                # 应用变换
+                warped_label = ants.apply_transforms(
+                    fixed=template,
+                    moving=label_mask,
+                    transformlist=registration['fwdtransforms'],
+                    interpolator='linear'
+                )
+
+                lobe_accumulators[label] += warped_label.numpy()
+
+            valid_count += 1
+
+        except Exception as e:
+            logger.warning(f"  [{i+1}] 配准失败: {e}")
+            continue
+
+    if valid_count == 0:
+        logger.error("没有有效的配准结果")
+        return None
+
+    # 投票生成最终标签：每个体素取得票最多的标签
+    final_lobes = np.zeros(template_shape, dtype=np.uint8)
+
+    for label in range(1, 6):
+        lobe_accumulators[label] /= valid_count
+
+    # 对每个体素，选择投票数最高且超过阈值的标签
+    for z in range(template_shape[0]):
+        for y in range(template_shape[1]):
+            for x in range(template_shape[2]):
+                votes = [lobe_accumulators[l][z, y, x] for l in range(1, 6)]
+                max_vote = max(votes)
+                if max_vote >= threshold:
+                    final_lobes[z, y, x] = votes.index(max_vote) + 1
+
+    # 保存
+    output_lobes_path = Path(output_lobes_path)
+    output_lobes_path.parent.mkdir(parents=True, exist_ok=True)
+    _, affine = load_nifti(template_path, return_affine=True)
+    save_nifti(final_lobes, output_lobes_path, affine=affine, dtype="uint8")
+
+    # 统计每个肺叶的体素数
+    logger.info(f"肺叶模板已保存（从 {valid_count} 个输入生成）: {output_lobes_path}")
+    for label in range(1, 6):
+        count = np.sum(final_lobes == label)
+        lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
+        logger.info(f"  {lobe_names[label]}: {count:,} 体素")
+
+    return output_lobes_path
+
+
 def validate_trachea_continuity(
     trachea_mask_path: Union[str, Path]
 ) -> Dict:
@@ -855,6 +979,7 @@ def main(
     template_path = output_dir / 'standard_template.nii.gz'
     mask_path = output_dir / 'standard_mask.nii.gz'
     trachea_path = output_dir / 'standard_trachea_mask.nii.gz'
+    lobes_path = output_dir / 'standard_lung_lobes_labeled.nii.gz'
     report_path = output_dir / 'atlas_evaluation_report.json'
 
     # 获取所有输入图像
@@ -870,6 +995,9 @@ def main(
     # 获取气管树 mask（如果存在）
     trachea_mask_paths = sorted(list(mask_dir.glob('*_trachea_mask.nii.gz'))) if mask_dir.exists() else []
 
+    # 获取肺叶标签 mask（如果存在）
+    lobes_mask_paths = sorted(list(mask_dir.glob('*_lung_lobes_labeled.nii.gz'))) if mask_dir.exists() else []
+
     logger.info("=" * 70)
     logger.info("Phase 2: Atlas Construction - 标准底座构建")
     logger.info("=" * 70)
@@ -878,6 +1006,7 @@ def main(
     logger.info(f"发现 {len(image_paths)} 个输入图像")
     logger.info(f"发现 {len(mask_paths)} 个输入肺部 mask")
     logger.info(f"发现 {len(trachea_mask_paths)} 个输入气管树 mask")
+    logger.info(f"发现 {len(lobes_mask_paths)} 个输入肺叶标签 mask")
     logger.info(f"输出目录: {output_dir}")
 
     if len(image_paths) < 2:
@@ -900,8 +1029,16 @@ def main(
     # 记录开始时间
     total_start = time.time()
 
-    # 确定步骤数（有气管树时是 4 步，否则 3 步）
-    total_steps = 4 if len(trachea_mask_paths) >= 3 else 3
+    # 确定步骤数（基于可用的输入类型）
+    # 基础步骤: 模板构建(1) + 肺部mask(2) + 验证(N)
+    # 可选步骤: 气管树(+1), 肺叶标签(+1)
+    has_trachea = len(trachea_mask_paths) >= 3
+    has_lobes = len(lobes_mask_paths) >= 3
+    total_steps = 3  # 基础: 模板 + mask + 验证
+    if has_trachea:
+        total_steps += 1
+    if has_lobes:
+        total_steps += 1
 
     # Step 1: 构建模板
     if skip_template_build:
@@ -943,16 +1080,18 @@ def main(
         if not quick_test and len(mask_paths) >= 3:
             logger.info("✓ 条件满足: 使用输入 mask 配准生成（高精度模式）...")
 
-            # 构建 image 和 mask 的对应关系
+            # 构建 image 和 mask 的对应关系（使用全部样本，而非只用 5 例）
             selected_images = []
             selected_masks = []
-            for img_path in image_paths[:min(5, len(image_paths))]:
+            for img_path in image_paths:  # 使用全部样本
                 img_stem = img_path.stem.replace('.nii', '')
                 sample_id = img_stem.replace('_clean', '')
                 expected_mask = mask_dir / f"{sample_id}_mask.nii.gz"
                 if expected_mask.exists():
                     selected_images.append(img_path)
                     selected_masks.append(expected_mask)
+
+            logger.info(f"  配准样本数: {len(selected_images)}")
 
             if len(selected_images) >= 3:
                 generate_template_mask_from_inputs(
@@ -983,15 +1122,18 @@ def main(
         return {'success': False, 'error': str(e)}
 
     # Step 3: 生成模板气管树 mask（如果有输入气管树 mask）
+    # Step 3: 生成气管树模板（如果有输入）
+    current_step = 3
     trachea_result = None
-    if len(trachea_mask_paths) >= 3:
+    if has_trachea:
         logger.info("")
-        logger.info(f"Step 3/{total_steps}: 生成模板气管树 mask...")
+        logger.info(f"Step {current_step}/{total_steps}: 生成模板气管树 mask...")
+        logger.info(f"  配准样本数: {len(image_paths)} CT, {len(trachea_mask_paths)} 气管树")
         try:
             trachea_result = generate_template_trachea_mask(
                 template_path=template_path,
-                input_image_paths=image_paths[:min(5, len(image_paths))],
-                input_trachea_paths=trachea_mask_paths[:min(5, len(trachea_mask_paths))],
+                input_image_paths=image_paths,  # 使用全部样本
+                input_trachea_paths=trachea_mask_paths,  # 使用全部样本
                 output_trachea_path=trachea_path
             )
             if trachea_result:
@@ -1000,10 +1142,26 @@ def main(
                 logger.info(f"  气管树验证: {'通过' if trachea_validation['valid'] else '警告'}")
         except Exception as e:
             logger.warning(f"气管树模板生成失败（非致命错误）: {e}")
-    else:
-        if total_steps == 4:
-            logger.info("")
-            logger.info(f"Step 3/{total_steps}: 跳过气管树 mask 生成（输入不足）")
+        current_step += 1
+
+    # Step 4: 生成肺叶标签模板（如果有输入）
+    lobes_result = None
+    if has_lobes:
+        logger.info("")
+        logger.info(f"Step {current_step}/{total_steps}: 生成模板肺叶标签 mask...")
+        logger.info(f"  配准样本数: {len(image_paths)} CT, {len(lobes_mask_paths)} 肺叶标签")
+        try:
+            lobes_result = generate_template_lung_lobes(
+                template_path=template_path,
+                input_image_paths=image_paths,  # 使用全部样本
+                input_lobes_paths=lobes_mask_paths,  # 使用全部样本
+                output_lobes_path=lobes_path
+            )
+            if lobes_result:
+                logger.info(f"  ✓ 肺叶标签模板已生成")
+        except Exception as e:
+            logger.warning(f"肺叶标签模板生成失败（非致命错误）: {e}")
+        current_step += 1
 
     # Step N: 验证 Atlas
     final_step = total_steps
@@ -1066,12 +1224,14 @@ def main(
         'template_path': str(template_path),
         'mask_path': str(mask_path),
         'trachea_path': str(trachea_path) if trachea_result else None,
+        'lobes_path': str(lobes_path) if lobes_result else None,
         'num_input_images': len(image_paths),
         'total_time_seconds': total_elapsed,
         'total_time_str': str(timedelta(seconds=int(total_elapsed))),
         'validation': validation_result,
         'evaluation': evaluation_result,
-        'has_trachea': trachea_result is not None
+        'has_trachea': trachea_result is not None,
+        'has_lobes': lobes_result is not None
     }
 
     logger.info("")
@@ -1082,6 +1242,8 @@ def main(
     logger.info(f"Mask 文件: {mask_path}")
     if trachea_result:
         logger.info(f"气管树 Mask: {trachea_path}")
+    if lobes_result:
+        logger.info(f"肺叶标签 Mask: {lobes_path}")
     logger.info(f"总耗时: {result['total_time_str']}")
 
     if evaluation_result and evaluation_result.get('passed'):

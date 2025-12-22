@@ -9,7 +9,8 @@ from .static_render import (
     render_comparison,
     render_multiview,
     render_template_only,
-    generate_slice_visualization
+    generate_slice_visualization,
+    render_atlas_complete_3views
 )
 from .dynamic_breath import create_breathing_animation, render_with_breathing
 
@@ -19,6 +20,7 @@ __all__ = [
     'render_multiview',
     'render_template_only',
     'generate_slice_visualization',
+    'render_atlas_complete_3views',
     'create_breathing_animation',
     'render_with_breathing',
 ]

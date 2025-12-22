@@ -863,6 +863,183 @@ def generate_slice_visualization(
     return output_paths
 
 
+def render_atlas_complete_3views(
+    lung_mask_path: Union[str, Path],
+    trachea_mask_path: Optional[Union[str, Path]] = None,
+    lobes_mask_path: Optional[Union[str, Path]] = None,
+    output_dir: Union[str, Path] = "data/02_atlas/visualizations",
+    output_prefix: str = "atlas_complete",
+    window_size: Tuple[int, int] = (800, 800),
+    lung_color: Tuple[float, float, float] = (0.8, 0.8, 0.8),
+    lung_opacity: float = 0.25,
+    trachea_color: Tuple[float, float, float] = (0.8, 0.4, 0.2),
+    trachea_opacity: float = 0.9
+) -> bool:
+    """
+    生成完整底座的三视图 3D 渲染图（肺叶 + 气管树）
+
+    参考用户上传的图片样式，生成 X/Y/Z 三个轴向的视图。
+
+    Args:
+        lung_mask_path: 肺部 mask 或肺叶标签 mask 路径
+        trachea_mask_path: 气管树 mask 路径（可选）
+        lobes_mask_path: 肺叶标签 mask 路径（可选，如果提供则用不同颜色渲染 5 肺叶）
+        output_dir: 输出目录
+        output_prefix: 输出文件前缀
+        window_size: 单个视角的窗口大小
+        lung_color: 肺部颜色 RGB（当无肺叶标签时使用）
+        lung_opacity: 肺部透明度
+        trachea_color: 气管树颜色 RGB（橙色）
+        trachea_opacity: 气管树透明度
+
+    Returns:
+        success: 是否成功
+
+    Output files:
+        - {output_prefix}_view_x.png
+        - {output_prefix}_view_y.png
+        - {output_prefix}_view_z.png
+    """
+    if not check_pyvista_available():
+        return False
+
+    lung_mask_path = Path(lung_mask_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not lung_mask_path.exists():
+        logger.error(f"肺部 mask 不存在: {lung_mask_path}")
+        return False
+
+    logger.info("=" * 60)
+    logger.info("生成完整底座三视图渲染...")
+    logger.info("=" * 60)
+
+    # 加载肺部 mask
+    lung_mask = load_nifti(lung_mask_path)
+    logger.info(f"  肺部 mask: {lung_mask_path.name}, 体素数: {np.sum(lung_mask > 0):,}")
+
+    # 定义肺叶颜色（5 种颜色）
+    lobe_colors = {
+        1: (0.4, 0.6, 0.9),   # 左上叶 - 浅蓝
+        2: (0.2, 0.4, 0.8),   # 左下叶 - 深蓝
+        3: (0.9, 0.6, 0.4),   # 右上叶 - 浅橙
+        4: (0.9, 0.8, 0.4),   # 右中叶 - 黄
+        5: (0.8, 0.4, 0.4),   # 右下叶 - 红
+    }
+
+    spacing = (1, 1, 1)
+    meshes = []
+
+    # 创建肺部网格
+    if lobes_mask_path and Path(lobes_mask_path).exists():
+        # 使用肺叶标签，为每个肺叶创建不同颜色的网格
+        lobes_mask = load_nifti(lobes_mask_path)
+        logger.info(f"  肺叶标签: {Path(lobes_mask_path).name}")
+
+        for lobe_id in range(1, 6):
+            lobe_binary = (lobes_mask == lobe_id).astype(float)
+            if np.sum(lobe_binary) > 100:  # 至少 100 体素
+                grid = pv.ImageData()
+                grid.dimensions = lobe_binary.shape
+                grid.spacing = spacing
+                grid.origin = (0, 0, 0)
+                grid.point_data["values"] = lobe_binary.flatten(order="F")
+                surface = grid.contour([0.5], scalars="values")
+                if surface.n_points > 0:
+                    surface = surface.smooth(n_iter=20, relaxation_factor=0.05)
+                    meshes.append({
+                        'mesh': surface,
+                        'color': lobe_colors[lobe_id],
+                        'opacity': lung_opacity,
+                        'name': f'lobe_{lobe_id}'
+                    })
+                    logger.info(f"    肺叶 {lobe_id}: {surface.n_points:,} 点")
+    else:
+        # 使用二值肺部 mask
+        lung_binary = clean_lung_mask(lung_mask, keep_largest_n=2).astype(float)
+        grid = pv.ImageData()
+        grid.dimensions = lung_binary.shape
+        grid.spacing = spacing
+        grid.origin = (0, 0, 0)
+        grid.point_data["values"] = lung_binary.flatten(order="F")
+        lung_surface = grid.contour([0.5], scalars="values")
+        if lung_surface.n_points > 0:
+            lung_surface = lung_surface.smooth(n_iter=30, relaxation_factor=0.05)
+            meshes.append({
+                'mesh': lung_surface,
+                'color': lung_color,
+                'opacity': lung_opacity,
+                'name': 'lung'
+            })
+            logger.info(f"  肺部网格: {lung_surface.n_points:,} 点")
+
+    # 加载气管树 mask（如果存在）
+    if trachea_mask_path and Path(trachea_mask_path).exists():
+        trachea_mask = load_nifti(trachea_mask_path)
+        trachea_binary = (trachea_mask > 0).astype(float)
+        logger.info(f"  气管树 mask: {Path(trachea_mask_path).name}, 体素数: {np.sum(trachea_binary):,}")
+
+        grid = pv.ImageData()
+        grid.dimensions = trachea_binary.shape
+        grid.spacing = spacing
+        grid.origin = (0, 0, 0)
+        grid.point_data["values"] = trachea_binary.flatten(order="F")
+        trachea_surface = grid.contour([0.5], scalars="values")
+        if trachea_surface.n_points > 0:
+            trachea_surface = trachea_surface.smooth(n_iter=30, relaxation_factor=0.05)
+            meshes.append({
+                'mesh': trachea_surface,
+                'color': trachea_color,
+                'opacity': trachea_opacity,
+                'name': 'trachea'
+            })
+            logger.info(f"  气管树网格: {trachea_surface.n_points:,} 点")
+
+    if not meshes:
+        logger.error("没有有效的网格可渲染")
+        return False
+
+    # 视角定义（与用户图片样式一致）
+    views = {
+        "x": {"vector": (1, 0, 0), "viewup": (0, 0, 1)},   # 从左往右看（矢状位）
+        "y": {"vector": (0, 1, 0), "viewup": (0, 0, 1)},   # 从前往后看（冠状位）
+        "z": {"vector": (0, 0, 1), "viewup": (0, 1, 0)},   # 从上往下看（轴位）
+    }
+
+    # 渲染三个视角
+    for view_name, view_params in views.items():
+        logger.info(f"  渲染 {view_name.upper()} 轴视角...")
+
+        plotter = pv.Plotter(off_screen=True, window_size=window_size)
+        plotter.set_background("white")
+
+        # 添加所有网格
+        for mesh_info in meshes:
+            plotter.add_mesh(
+                mesh_info['mesh'],
+                color=mesh_info['color'],
+                opacity=mesh_info['opacity'],
+                smooth_shading=True
+            )
+
+        plotter.view_vector(vector=view_params["vector"], viewup=view_params["viewup"])
+        plotter.camera.zoom(1.3)
+        plotter.add_axes()
+
+        output_path = output_dir / f"{output_prefix}_view_{view_name}.png"
+        plotter.screenshot(str(output_path))
+        plotter.close()
+
+        logger.info(f"  ✅ 已保存: {output_path}")
+
+    logger.info("=" * 60)
+    logger.info("底座三视图渲染完成")
+    logger.info("=" * 60)
+
+    return True
+
+
 def main(config: dict) -> None:
     """主函数"""
     paths = config.get('paths', {})

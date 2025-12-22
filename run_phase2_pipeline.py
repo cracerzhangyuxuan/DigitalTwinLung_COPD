@@ -741,7 +741,10 @@ def main():
     # 输出结果摘要
     atlas_dir = Path(config['paths']['atlas'])
     template_file = atlas_dir / "standard_template.nii.gz"
+    mask_file = atlas_dir / "standard_mask.nii.gz"
     trachea_file = atlas_dir / "standard_trachea_mask.nii.gz"
+    lobes_file = atlas_dir / "standard_lung_lobes_labeled.nii.gz"
+    viz_dir = atlas_dir / "visualizations"
 
     logger.info("")
     if template_file.exists():
@@ -750,6 +753,35 @@ def main():
     if trachea_file.exists():
         logger.info("✓ 气管树模板已生成")
         logger.info(f"  - {trachea_file}")
+    if lobes_file.exists():
+        logger.info("✓ 肺叶标签模板已生成")
+        logger.info(f"  - {lobes_file}")
+
+    # 生成完整底座三视图可视化
+    if mask_file.exists() or lobes_file.exists():
+        logger.info("")
+        logger.info("生成底座三视图可视化...")
+        try:
+            viz_module = importlib.import_module("src.05_visualization.static_render")
+            render_atlas_complete_3views = viz_module.render_atlas_complete_3views
+
+            viz_success = render_atlas_complete_3views(
+                lung_mask_path=lobes_file if lobes_file.exists() else mask_file,
+                trachea_mask_path=trachea_file if trachea_file.exists() else None,
+                lobes_mask_path=lobes_file if lobes_file.exists() else None,
+                output_dir=viz_dir,
+                output_prefix="atlas_complete"
+            )
+            if viz_success:
+                logger.info(f"✓ 可视化已生成:")
+                for png in viz_dir.glob("atlas_complete_view_*.png"):
+                    logger.info(f"  - {png}")
+            else:
+                logger.warning("⚠ 可视化生成失败")
+        except ImportError as e:
+            logger.warning(f"⚠ 无法导入可视化模块: {e}")
+        except Exception as e:
+            logger.warning(f"⚠ 可视化生成失败: {e}")
 
     if template_file.exists() or trachea_file.exists():
         logger.info("")
@@ -758,7 +790,10 @@ def main():
 
     logger.info("下一步:")
     logger.info("  1. 检查 data/02_atlas/ 中的模板文件")
-    logger.info("  2. 使用 3D Slicer 可视化检查模板质量")
+    if viz_dir.exists() and any(viz_dir.glob("*.png")):
+        logger.info(f"  2. 查看可视化: {viz_dir}")
+    else:
+        logger.info("  2. 使用 3D Slicer 可视化检查模板质量")
     logger.info("  3. 运行 Phase 3: COPD 数据配准和 AI 模型训练")
 
 
