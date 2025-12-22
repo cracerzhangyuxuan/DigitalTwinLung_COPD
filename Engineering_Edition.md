@@ -24,16 +24,20 @@ DigitalTwinLung_COPD/
 │   │   # 不再需要 01_cleaned/*_nifti/ 中间转换目录
 │   │
 │   ├── 01_cleaned/               # 预处理输出 (分割 + 清理结果)
-│   │   ├── normal_mask/          # 正常肺分割 Mask (normal_001_mask.nii.gz)
+│   │   ├── normal_mask/          # 正常肺分割 Mask
+│   │   │   ├── *_mask.nii.gz             # 肺部二值 mask
+│   │   │   ├── *_trachea_mask.nii.gz     # [新增] 气管树 mask
+│   │   │   └── *_lung_lobes_labeled.nii.gz  # [新增] 5肺叶标签 mask (值1-5)
 │   │   ├── normal_clean/         # 背景清理后的纯净 CT (normal_001_clean.nii.gz)
-│   │   ├── copd_mask/            # COPD 肺部 Mask (copd_001_mask.nii.gz)
+│   │   ├── copd_mask/            # COPD 肺部 Mask (同上结构)
 │   │   ├── copd_clean/           # COPD 背景清理后 (copd_001_clean.nii.gz)
 │   │   └── copd_emphysema/       # LAA-950 提取的肺气肿病灶 (copd_001_emphysema.nii.gz)
 │   │
 │   ├── 02_atlas/                 # 标准数字孪生底座
-│   │   ├── standard_template.nii.gz  # 最终生成的平均 CT (Phase 2 输出)
-│   │   ├── standard_mask.nii.gz      # 模板肺部 Mask (质量评估用)
-│   │   └── temp_template*.nii.gz     # 临时模板文件 (Phase 1 使用)
+│   │   ├── standard_template.nii.gz      # 最终生成的平均 CT (Phase 2 输出)
+│   │   ├── standard_mask.nii.gz          # 模板肺部 Mask (质量评估用)
+│   │   ├── standard_trachea_mask.nii.gz  # [新增] 模板气管树 Mask
+│   │   └── temp_template*.nii.gz         # 临时模板文件 (Phase 1 使用)
 │   │
 │   ├── 03_mapped/                # 配准后的中间结果
 │   │   └── copd_001/             # 按病人ID存放
@@ -70,15 +74,18 @@ DigitalTwinLung_COPD/
 │   │
 │   ├── 01_preprocessing/         # 阶段一：清洗与特征提取
 │   │   ├── __init__.py
-│   │   ├── run_segmentation.py   # 调用 TotalSegmentator
+│   │   ├── run_segmentation.py   # 调用 TotalSegmentator（含气管树分割、肺叶标记）
 │   │   ├── clean_background.py   # 去除骨骼背景
 │   │   ├── simple_lung_segment.py # 简单肺分割（阈值法）
 │   │   ├── precise_lung_segment.py # [新增] 精确肺分割（纯净度 99.5%）
 │   │   └── extract_emphysema.py  # LAA-950 算法提取病灶 Mask（含气道排除）
+│   │   # [2025-12-22 新增功能]
+│   │   # - extract_trachea_mask(): 提取气管树 mask
+│   │   # - create_labeled_lung_lobes(): 5个肺叶独立标签 (1-5)
 │   │
 │   ├── 02_atlas_build/           # 阶段二：底座构建
 │   │   ├── __init__.py
-│   │   └── build_template_ants.py# 调用 ants.build_template
+│   │   └── build_template_ants.py# 调用 ants.build_template + 气管树模板生成
 │   │
 │   ├── 03_registration/          # 阶段三(上)：空间映射
 │   │   ├── __init__.py
@@ -228,6 +235,44 @@ laa_percentage, stats = extract_emphysema_mask(
 | 软组织/骨骼占比 | 55.4% | 0.5% | -54.9% |
 | LAA-950 百分比 | 0.38% | 0.24% | 更准确 |
 | 病灶体素数 | 109,122 | 21,360 | -80% (排除气道) |
+
+**Phase 2 新增功能 (2025-12-22)**
+
+| 功能 | 函数 | 说明 |
+| :--- | :--- | :--- |
+| 气管树分割 | `extract_trachea_mask()` | 从 TotalSegmentator 输出提取气管树 mask |
+| 肺叶精细标记 | `create_labeled_lung_lobes()` | 5 个肺叶独立标签 (1-5)，含体积统计 |
+| 气管树模板生成 | `generate_template_trachea_mask()` | 配准生成标准气管树 mask |
+| 气管树连续性验证 | `validate_trachea_continuity()` | 检查气管树的连通性和解剖合理性 |
+
+**肺叶标签对照表**
+
+| 标签值 | 解剖结构 | TotalSegmentator ROI |
+| :---: | :--- | :--- |
+| 1 | 左上叶 (Left Upper) | `lung_upper_lobe_left` |
+| 2 | 左下叶 (Left Lower) | `lung_lower_lobe_left` |
+| 3 | 右上叶 (Right Upper) | `lung_upper_lobe_right` |
+| 4 | 右中叶 (Right Middle) | `lung_middle_lobe_right` |
+| 5 | 右下叶 (Right Lower) | `lung_lower_lobe_right` |
+
+**气管树分割示例代码**
+
+```python
+from src.01_preprocessing.run_segmentation import extract_trachea_mask, create_labeled_lung_lobes
+
+# 提取气管树 mask
+trachea_mask, affine = extract_trachea_mask(
+    segmentation_dir="path/to/totalsegmentator_output",
+    output_path="output/trachea_mask.nii.gz"
+)
+
+# 创建精细标记的肺叶 mask
+labeled_lobes, volume_stats, affine = create_labeled_lung_lobes(
+    segmentation_dir="path/to/totalsegmentator_output",
+    output_path="output/lung_lobes_labeled.nii.gz"
+)
+# volume_stats: {1: 1234.5, 2: 987.6, ...}  # 单位: mL
+```
 
 **配准性能优化记录 (2025-12-04)**
 

@@ -71,8 +71,21 @@ pip install TotalSegmentator
 python run_pipeline.py
 
 # 或分阶段运行
+
+# Phase 1: 预处理（含气管树分割和肺叶标记）
 python -m src.01_preprocessing.run_segmentation
-python -m src.02_atlas_build.build_template_ants
+
+# Phase 2: 标准底座构建（含气管树和5肺叶标签）
+python run_phase2_pipeline.py
+
+# Phase 2 常用选项:
+# 快速测试（3例）: python run_phase2_pipeline.py --quick-test
+# 仅分割步骤:      python run_phase2_pipeline.py --step1-only
+# 仅气管树模板:    python run_phase2_pipeline.py --step2-only
+# 限制处理数量:    python run_phase2_pipeline.py --limit 5
+# 强制覆盖:        python run_phase2_pipeline.py --force
+
+# Phase 3-4: 配准、融合与可视化
 python -m src.03_registration.register_lesions
 python -m src.04_texture_synthesis.train
 python -m src.05_visualization.static_render
@@ -89,9 +102,14 @@ pytest tests/ -v
 | 阶段 | 目标 | 输入 | 输出 |
 |------|------|------|------|
 | Phase 1 | MVP验证 | 3+1例CT | 3D截图 |
-| Phase 2 | 底座构建 | 15-20例正常肺 | Template |
-| Phase 3 | AI融合 | 30-50例COPD | 融合CT |
+| Phase 2 | 底座构建 | 37例正常肺 | Template + 气管树Mask |
+| Phase 3 | AI融合 | 29例COPD | 融合CT |
 | Phase 4 | 演示输出 | 融合CT | 视频/图片 |
+
+**Phase 2 输出文件：**
+- `standard_template.nii.gz` - 标准肺部模板
+- `standard_mask.nii.gz` - 肺部模板 mask
+- `standard_trachea_mask.nii.gz` - 气管树模板 mask（新增）
 
 ## 📖 文档
 

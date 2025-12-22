@@ -3,7 +3,7 @@
 """
 Phase 2: Atlas Construction - 标准底座构建入口脚本
 
-使用 ANTsPy 从多例正常肺 CT 构建标准模板。
+使用 ANTsPy 从多例正常肺 CT 构建标准模板，支持气管树模板生成。
 
 使用方法：
     # 默认运行（使用所有可用的正常肺数据）
@@ -26,20 +26,29 @@ Phase 2: Atlas Construction - 标准底座构建入口脚本
     nohup python run_phase2_atlas.py > logs/phase2_atlas.log 2>&1 &
 
 输入数据要求：
-    - 数据位置：data/01_cleaned/normal_clean/*.nii.gz
+    - CT 数据：data/01_cleaned/normal_clean/*.nii.gz
+    - 肺部 mask：data/01_cleaned/normal_mask/*_mask.nii.gz
+    - 气管树 mask：data/01_cleaned/normal_mask/*_trachea_mask.nii.gz（可选，用于气管树模板）
     - 数据格式：NIfTI (.nii.gz)
     - 推荐数量：15-40 例正常肺 CT
-    - 对应 mask：data/01_cleaned/normal_mask/*.nii.gz（可选，用于 Dice 评估）
 
 输出文件：
-    - data/02_atlas/standard_template.nii.gz  - 标准模板
-    - data/02_atlas/standard_mask.nii.gz      - 模板肺部 mask
-    - data/02_atlas/atlas_evaluation_report.json - 质量评估报告
+    - data/02_atlas/standard_template.nii.gz      - 标准肺部模板
+    - data/02_atlas/standard_mask.nii.gz          - 模板肺部 mask
+    - data/02_atlas/standard_trachea_mask.nii.gz  - 模板气管树 mask（新增）
+    - data/02_atlas/atlas_evaluation_report.json  - 质量评估报告
+
+流程步骤：
+    Step 1: 使用 ants.build_template() 构建标准模板
+    Step 2: 生成模板肺部 mask（配准投票法或阈值法）
+    Step 3: 生成模板气管树 mask（如果有输入气管树 mask）
+    Step 4: 验证 Atlas 质量（文件大小、Dice 系数、连续性）
 
 验收标准：
     - 模板文件大小 > 10MB
     - 与任一输入肺的 Dice >= 0.85
     - 血管/气管结构可辨识（在 3D Slicer 中目视确认）
+    - 气管树连续性检查通过（单连通域）
 
 预计运行时间：
     - 15-20 例数据：4-8 小时
@@ -48,6 +57,7 @@ Phase 2: Atlas Construction - 标准底座构建入口脚本
 
 作者: DigitalTwinLung_COPD Team
 日期: 2025-12-09
+更新: 2025-12-22 - 添加气管树模板生成功能
 """
 
 import sys

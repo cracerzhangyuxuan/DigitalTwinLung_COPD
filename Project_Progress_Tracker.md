@@ -1,6 +1,6 @@
 # COPD 数字孪生肺项目 - 进度追踪文档
 
-**更新日期：** 2025年12月9日
+**更新日期：** 2025年12月22日
 **项目名称：** 基于全代码自动化的COPD数字孪生肺构建与3D可视化研究
 
 ---
@@ -40,18 +40,24 @@
                                       |
                                       v
 +------------------------------------------------------------------------------+
-| [ ] PHASE 2: Atlas Construction - 标准底座构建                               |
+| [~] PHASE 2: Atlas Construction - 标准底座构建 (代码完成 2025-12-22)         |
 +------------------------------------------------------------------------------+
-| 目标: 生成高质量数字孪生底座                                                 |
-| 输入: 15-20例正常肺CT                                                        |
+| 目标: 生成高质量数字孪生底座（含气管树）                                     |
+| 输入: 37例正常肺CT + 29例COPD CT                                             |
 |                                                                              |
 | 任务流程:                                                                    |
-|   [ ] 数据扩充 -> [ ] 构建模版 -> [ ] 结果固化                               |
+|   [x] 数据扩充 -> [x] 构建模版 -> [ ] 结果固化                               |
 |       收集正常肺    build_template_ants.py    存入 data/02_atlas/            |
 |                     (运行约一整夜)                                           |
 |                                                                              |
-| 输出: standard_template.nii.gz, standard_mask.nii.gz                         |
-| 验收: [ ] Dice>=0.85  [ ] 血管/气管结构清晰                                  |
+| 新增功能 (2025-12-22):                                                       |
+|   [x] 气管树分割 (extract_trachea_mask)                                      |
+|   [x] 肺叶精细标记 (create_labeled_lung_lobes, 5个独立标签)                  |
+|   [x] 气管树模板生成 (generate_template_trachea_mask)                        |
+|                                                                              |
+| 输出: standard_template.nii.gz, standard_mask.nii.gz,                        |
+|       standard_trachea_mask.nii.gz (新增)                                    |
+| 验收: [ ] Dice>=0.85  [ ] 血管/气管结构清晰  [ ] 气管树连续性验证            |
 +------------------------------------------------------------------------------+
                                       |
                                       v
@@ -200,12 +206,19 @@ DigitalTwinLung_COPD/
 │   │   └── copd/                 # COPD 患者 DICOM/NIfTI
 │   │
 │   ├── 01_cleaned/               # 预处理后的纯净数据
-│   │   ├── normal_clean/         # 仅含肺部，背景为 -1000
-│   │   └── copd_clean/
+│   │   ├── normal_clean/         # 仅含肺部，背景为 -1000 (normal_001_clean.nii.gz)
+│   │   ├── normal_mask/          # 肺部二值 mask (normal_001_mask.nii.gz)
+│   │   │   ├── *_mask.nii.gz             # 肺部二值 mask
+│   │   │   ├── *_trachea_mask.nii.gz     # [新增] 气管树 mask
+│   │   │   └── *_lung_lobes_labeled.nii.gz  # [新增] 5肺叶标签 mask (值1-5)
+│   │   ├── copd_clean/           # COPD 背景清理后
+│   │   ├── copd_mask/            # COPD 肺部 mask
+│   │   └── copd_emphysema/       # LAA-950 提取的肺气肿病灶
 │   │
 │   ├── 02_atlas/                 # 标准数字孪生底座
 │   │   ├── standard_template.nii.gz  # 最终生成的平均 CT
-│   │   └── standard_mask.nii.gz      # 对应的肺部 Mask
+│   │   ├── standard_mask.nii.gz      # 对应的肺部 Mask
+│   │   └── standard_trachea_mask.nii.gz  # [新增] 气管树模板 Mask
 │   │
 │   ├── 03_mapped/                # 配准后的中间结果
 │   │   └── patient_001/          # 按病人ID存放

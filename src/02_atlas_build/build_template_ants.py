@@ -8,6 +8,7 @@
 主要功能：
 - build_template(): 从多例正常肺构建标准模板
 - generate_template_mask(): 为模板生成肺部 mask
+- generate_template_trachea_mask(): 为模板生成气管树 mask
 - evaluate_template_quality(): 评估模板质量（Dice >= 0.85）
 - validate_atlas(): 完整的质量验证流程
 
@@ -19,9 +20,11 @@
 - standard_template.nii.gz 文件大小 > 10MB
 - 与任一输入肺的 Dice >= 0.85
 - 血管/气管结构可辨识
+- standard_trachea_mask.nii.gz 气管树连续性验证
 
 作者: DigitalTwinLung_COPD Team
 更新: 2025-12-09
+更新: 2025-12-22 - 添加气管树模板 mask 生成功能
 """
 
 from pathlib import Path
@@ -357,6 +360,193 @@ def generate_template_mask_from_inputs(
     return output_mask_path
 
 
+def generate_template_trachea_mask(
+    template_path: Union[str, Path],
+    input_image_paths: List[Union[str, Path]],
+    input_trachea_paths: List[Union[str, Path]],
+    output_trachea_path: Union[str, Path],
+    threshold: float = 0.5
+) -> Optional[Path]:
+    """
+    从输入气管树 mask 配准生成模板气管树 mask
+
+    通过将多个输入样本的气管树 mask 配准到模板空间并投票，
+    生成标准模板的气管树 mask。
+
+    Args:
+        template_path: 模板 CT 路径
+        input_image_paths: 输入图像路径列表
+        input_trachea_paths: 对应的输入气管树 mask 路径列表
+        output_trachea_path: 输出气管树模板 mask 路径
+        threshold: 投票阈值（默认 0.5）
+
+    Returns:
+        output_trachea_path: 生成的气管树模板 mask 路径，失败返回 None
+
+    Note:
+        气管树结构相对稳定，配准后应保持连续性。
+        如果连通性检查失败，将输出警告但仍保存结果。
+    """
+    if not check_ants_available():
+        raise ImportError("ANTsPy 不可用")
+
+    logger.info("=" * 60)
+    logger.info("生成模板气管树 mask...")
+    logger.info(f"  输入图像数: {len(input_image_paths)}")
+    logger.info(f"  输入气管 mask 数: {len(input_trachea_paths)}")
+    logger.info("=" * 60)
+
+    # 检查输入
+    if len(input_trachea_paths) == 0:
+        logger.warning("没有输入气管树 mask，跳过气管树模板生成")
+        return None
+
+    template = ants.image_read(str(template_path))
+    template_shape = template.shape
+
+    # 累积配准后的气管树 mask
+    accumulated_mask = np.zeros(template_shape, dtype=np.float32)
+    valid_count = 0
+
+    for i, (img_path, trachea_path) in enumerate(zip(input_image_paths, input_trachea_paths)):
+        img_path = Path(img_path)
+        trachea_path = Path(trachea_path)
+
+        if not img_path.exists() or not trachea_path.exists():
+            logger.warning(f"  [{i+1}] 文件缺失，跳过")
+            continue
+
+        try:
+            # 加载图像和气管 mask
+            img = ants.image_read(str(img_path))
+            trachea_mask = ants.image_read(str(trachea_path))
+
+            # 配准图像到模板
+            logger.info(f"  [{i+1}/{len(input_image_paths)}] 配准: {img_path.name}")
+            registration = ants.registration(
+                fixed=template,
+                moving=img,
+                type_of_transform='SyN'
+            )
+
+            # 将气管 mask 应用相同的变换
+            warped_trachea = ants.apply_transforms(
+                fixed=template,
+                moving=trachea_mask,
+                transformlist=registration['fwdtransforms'],
+                interpolator='nearestNeighbor'  # 最近邻插值保持二值
+            )
+
+            accumulated_mask += (warped_trachea.numpy() > 0).astype(np.float32)
+            valid_count += 1
+            logger.info(f"    ✓ 配准成功")
+
+        except Exception as e:
+            logger.warning(f"  [{i+1}/{len(input_image_paths)}] 配准失败: {e}")
+
+    if valid_count == 0:
+        logger.error("没有成功配准任何气管树 mask")
+        return None
+
+    # 投票生成最终 mask
+    probability_map = accumulated_mask / valid_count
+    final_trachea_mask = (probability_map >= threshold).astype(np.uint8)
+
+    # 形态学清理
+    if ndimage is not None:
+        from scipy.ndimage import binary_closing, binary_opening
+        # 轻微开操作去噪
+        final_trachea_mask = binary_opening(final_trachea_mask, iterations=1).astype(np.uint8)
+        # 闭操作保持连续性
+        final_trachea_mask = binary_closing(final_trachea_mask, iterations=2).astype(np.uint8)
+
+    # 连通性验证
+    if ndimage is not None:
+        labeled, num_features = ndimage.label(final_trachea_mask)
+        if num_features > 1:
+            # 保留最大连通域（主气管树）
+            sizes = ndimage.sum(final_trachea_mask, labeled, range(1, num_features + 1))
+            largest_idx = np.argmax(sizes) + 1
+            final_trachea_mask = (labeled == largest_idx).astype(np.uint8)
+            logger.warning(f"  气管树有 {num_features} 个连通域，保留最大的")
+        else:
+            logger.info(f"  ✓ 气管树连续性检查通过")
+
+    # 保存
+    output_trachea_path = Path(output_trachea_path)
+    output_trachea_path.parent.mkdir(parents=True, exist_ok=True)
+    _, affine = load_nifti(template_path, return_affine=True)
+    save_nifti(final_trachea_mask, output_trachea_path, affine=affine, dtype="uint8")
+
+    final_voxels = np.sum(final_trachea_mask)
+    logger.info(f"气管树模板 mask 已保存（从 {valid_count} 个输入生成）: {output_trachea_path}")
+    logger.info(f"  气管树体素数: {final_voxels:,}")
+
+    return output_trachea_path
+
+
+def validate_trachea_continuity(
+    trachea_mask_path: Union[str, Path]
+) -> Dict:
+    """
+    验证气管树 mask 的连续性和解剖合理性
+
+    Args:
+        trachea_mask_path: 气管树 mask 路径
+
+    Returns:
+        validation_result: 验证结果字典
+    """
+    logger.info("验证气管树连续性...")
+
+    result = {
+        'valid': True,
+        'checks': [],
+        'warnings': []
+    }
+
+    trachea_path = Path(trachea_mask_path)
+
+    if not trachea_path.exists():
+        result['valid'] = False
+        result['warnings'].append(f"气管树 mask 不存在: {trachea_path}")
+        return result
+
+    try:
+        trachea_data = load_nifti(trachea_path)
+        voxel_count = np.sum(trachea_data > 0)
+
+        # 检查体素数量（气管树通常在 5000-50000 体素之间）
+        if voxel_count < 1000:
+            result['warnings'].append(f"气管树体素数过少: {voxel_count}")
+        elif voxel_count > 100000:
+            result['warnings'].append(f"气管树体素数异常多: {voxel_count}")
+        else:
+            result['checks'].append(f"✓ 气管树体素数合理: {voxel_count:,}")
+
+        # 连通性检查
+        if ndimage is not None:
+            _, num_features = ndimage.label(trachea_data > 0)
+            if num_features == 1:
+                result['checks'].append("✓ 气管树完全连续（单连通域）")
+            elif num_features <= 3:
+                result['warnings'].append(f"气管树有 {num_features} 个连通域（可能是分支）")
+            else:
+                result['warnings'].append(f"气管树碎片化: {num_features} 个连通域")
+
+    except Exception as e:
+        result['valid'] = False
+        result['warnings'].append(f"读取气管树 mask 失败: {e}")
+
+    # 输出结果
+    for check in result['checks']:
+        logger.info(f"  {check}")
+    for warning in result['warnings']:
+        logger.warning(f"  ⚠️ {warning}")
+
+    return result
+
+
 def evaluate_template_quality(
     template_path: Union[str, Path],
     template_mask_path: Union[str, Path],
@@ -662,11 +852,15 @@ def main(
 
     template_path = output_dir / 'standard_template.nii.gz'
     mask_path = output_dir / 'standard_mask.nii.gz'
+    trachea_path = output_dir / 'standard_trachea_mask.nii.gz'
     report_path = output_dir / 'atlas_evaluation_report.json'
 
     # 获取所有输入图像
     image_paths = sorted(list(input_dir.glob('*.nii.gz')))
-    mask_paths = sorted(list(mask_dir.glob('*.nii.gz'))) if mask_dir.exists() else []
+    mask_paths = sorted(list(mask_dir.glob('*_mask.nii.gz'))) if mask_dir.exists() else []
+
+    # 获取气管树 mask（如果存在）
+    trachea_mask_paths = sorted(list(mask_dir.glob('*_trachea_mask.nii.gz'))) if mask_dir.exists() else []
 
     logger.info("=" * 70)
     logger.info("Phase 2: Atlas Construction - 标准底座构建")
@@ -674,7 +868,8 @@ def main(
     logger.info(f"输入目录: {input_dir}")
     logger.info(f"Mask 目录: {mask_dir}")
     logger.info(f"发现 {len(image_paths)} 个输入图像")
-    logger.info(f"发现 {len(mask_paths)} 个输入 mask")
+    logger.info(f"发现 {len(mask_paths)} 个输入肺部 mask")
+    logger.info(f"发现 {len(trachea_mask_paths)} 个输入气管树 mask")
     logger.info(f"输出目录: {output_dir}")
 
     if len(image_paths) < 2:
@@ -697,10 +892,13 @@ def main(
     # 记录开始时间
     total_start = time.time()
 
+    # 确定步骤数（有气管树时是 4 步，否则 3 步）
+    total_steps = 4 if len(trachea_mask_paths) >= 3 else 3
+
     # Step 1: 构建模板
     if skip_template_build:
         logger.info("")
-        logger.info("Step 1/3: 跳过模板构建（使用已有模板）...")
+        logger.info(f"Step 1/{total_steps}: 跳过模板构建（使用已有模板）...")
         if not template_path.exists():
             error_msg = f"模板文件不存在: {template_path}\n请先运行完整的 Atlas 构建（不带 --skip-step1 参数）"
             logger.error(error_msg)
@@ -716,7 +914,7 @@ def main(
             logger.warning(f"  无法读取模板信息: {e}")
     else:
         logger.info("")
-        logger.info("Step 1/3: 构建标准模板...")
+        logger.info(f"Step 1/{total_steps}: 构建标准模板...")
         try:
             build_template(
                 image_paths=image_paths,
@@ -729,19 +927,16 @@ def main(
             logger.error(f"模板构建失败: {e}")
             return {'success': False, 'error': str(e)}
 
-    # Step 2: 生成模板 mask
+    # Step 2: 生成模板肺部 mask
     logger.info("")
-    logger.info("Step 2/3: 生成模板肺部 mask...")
-    logger.info(f"  template_path 类型: {type(template_path).__name__}, 值: {template_path}")
-    logger.info(f"  mask_path 类型: {type(mask_path).__name__}, 值: {mask_path}")
-    logger.info(f"  quick_test: {quick_test}, mask_paths 数量: {len(mask_paths)}")
+    logger.info(f"Step 2/{total_steps}: 生成模板肺部 mask...")
     try:
         # 优先使用输入 mask 配准生成（更精确），快速测试时用阈值分割（更快）
         if not quick_test and len(mask_paths) >= 3:
             logger.info("✓ 条件满足: 使用输入 mask 配准生成（高精度模式）...")
             generate_template_mask_from_inputs(
                 template_path=template_path,
-                input_image_paths=image_paths[:min(5, len(image_paths))],  # 最多用 5 个
+                input_image_paths=image_paths[:min(5, len(image_paths))],
                 input_mask_paths=mask_paths[:min(5, len(mask_paths))],
                 output_mask_path=mask_path
             )
@@ -760,9 +955,33 @@ def main(
         logger.error(traceback.format_exc())
         return {'success': False, 'error': str(e)}
 
-    # Step 3: 验证 Atlas
+    # Step 3: 生成模板气管树 mask（如果有输入气管树 mask）
+    trachea_result = None
+    if len(trachea_mask_paths) >= 3:
+        logger.info("")
+        logger.info(f"Step 3/{total_steps}: 生成模板气管树 mask...")
+        try:
+            trachea_result = generate_template_trachea_mask(
+                template_path=template_path,
+                input_image_paths=image_paths[:min(5, len(image_paths))],
+                input_trachea_paths=trachea_mask_paths[:min(5, len(trachea_mask_paths))],
+                output_trachea_path=trachea_path
+            )
+            if trachea_result:
+                # 验证气管树连续性
+                trachea_validation = validate_trachea_continuity(trachea_path)
+                logger.info(f"  气管树验证: {'通过' if trachea_validation['valid'] else '警告'}")
+        except Exception as e:
+            logger.warning(f"气管树模板生成失败（非致命错误）: {e}")
+    else:
+        if total_steps == 4:
+            logger.info("")
+            logger.info(f"Step 3/{total_steps}: 跳过气管树 mask 生成（输入不足）")
+
+    # Step N: 验证 Atlas
+    final_step = total_steps
     logger.info("")
-    logger.info("Step 3/3: 验证 Atlas 质量...")
+    logger.info(f"Step {final_step}/{total_steps}: 验证 Atlas 质量...")
 
     validation_result = validate_atlas(template_path, mask_path)
 
@@ -800,11 +1019,13 @@ def main(
         'success': validation_result['valid'],
         'template_path': str(template_path),
         'mask_path': str(mask_path),
+        'trachea_path': str(trachea_path) if trachea_result else None,
         'num_input_images': len(image_paths),
         'total_time_seconds': total_elapsed,
         'total_time_str': str(timedelta(seconds=int(total_elapsed))),
         'validation': validation_result,
-        'evaluation': evaluation_result
+        'evaluation': evaluation_result,
+        'has_trachea': trachea_result is not None
     }
 
     logger.info("")
@@ -813,6 +1034,8 @@ def main(
     logger.info("=" * 70)
     logger.info(f"模板文件: {template_path}")
     logger.info(f"Mask 文件: {mask_path}")
+    if trachea_result:
+        logger.info(f"气管树 Mask: {trachea_path}")
     logger.info(f"总耗时: {result['total_time_str']}")
 
     if evaluation_result and evaluation_result.get('passed'):

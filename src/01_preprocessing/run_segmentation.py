@@ -6,12 +6,15 @@
 使用 TotalSegmentator 进行自动肺部分割，支持：
 - GPU 加速分割（TotalSegmentator）
 - CPU 阈值分割（备选方案）
+- 气管树分割（trachea）
+- 肺叶精细标记（5个肺叶独立标签）
 - 批量处理
 - 环境检查
 
 作者: DigitalTwinLung_COPD Team
 日期: 2025-12-09
 更新: 2025-12-14 - 整合 GPU 分割功能
+更新: 2025-12-22 - 添加气管树分割和肺叶精细标记功能
 """
 
 import shutil
@@ -245,8 +248,173 @@ def combine_lung_masks(
     
     if combined_mask is None:
         raise FileNotFoundError(f"未找到肺部分割结果: {segmentation_dir}")
-    
+
     return combined_mask.astype(np.uint8)
+
+
+# =============================================================================
+# 肺叶标记常量定义
+# =============================================================================
+
+# 肺叶标签值定义（符合解剖学标准）
+LOBE_LABELS = {
+    "lung_upper_lobe_left": 1,      # 左上叶 (Left Upper Lobe)
+    "lung_lower_lobe_left": 2,      # 左下叶 (Left Lower Lobe)
+    "lung_upper_lobe_right": 3,     # 右上叶 (Right Upper Lobe)
+    "lung_middle_lobe_right": 4,    # 右中叶 (Right Middle Lobe)
+    "lung_lower_lobe_right": 5,     # 右下叶 (Right Lower Lobe)
+}
+
+# 标签值到中文名称的映射
+LOBE_NAMES = {
+    1: "左上叶 (Left Upper)",
+    2: "左下叶 (Left Lower)",
+    3: "右上叶 (Right Upper)",
+    4: "右中叶 (Right Middle)",
+    5: "右下叶 (Right Lower)",
+}
+
+# 气管树相关结构
+TRACHEA_STRUCTURES = [
+    "trachea",              # 气管
+    "bronchus_left",        # 左主支气管 (TotalSegmentator可能不单独输出)
+    "bronchus_right",       # 右主支气管 (TotalSegmentator可能不单独输出)
+]
+
+
+# =============================================================================
+# 气管树分割函数
+# =============================================================================
+
+def extract_trachea_mask(
+    segmentation_dir: Union[str, Path],
+    output_path: Optional[Union[str, Path]] = None
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    从 TotalSegmentator 输出中提取气管树 mask
+
+    TotalSegmentator 输出的气管相关结构:
+    - trachea.nii.gz (气管主干)
+
+    Args:
+        segmentation_dir: TotalSegmentator 输出目录
+        output_path: 可选，保存气管树 mask 的路径
+
+    Returns:
+        trachea_mask: 气管树 mask (uint8)
+        affine: NIfTI affine 矩阵（如果有）
+    """
+    import nibabel as nib
+
+    segmentation_dir = Path(segmentation_dir)
+    trachea_mask = None
+    affine = None
+
+    # 尝试加载气管 mask
+    trachea_path = segmentation_dir / "trachea.nii.gz"
+    if trachea_path.exists():
+        nii = nib.load(str(trachea_path))
+        trachea_mask = np.asanyarray(nii.dataobj) > 0
+        affine = nii.affine
+        logger.debug(f"加载气管 mask: {trachea_path.name}")
+    else:
+        logger.warning(f"气管 mask 文件不存在: {trachea_path}")
+        return None, None
+
+    trachea_mask = trachea_mask.astype(np.uint8)
+
+    # 保存气管树 mask
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        save_nifti(trachea_mask, output_path, affine=affine, dtype='uint8')
+        logger.info(f"气管树 mask 已保存: {output_path}")
+
+    return trachea_mask, affine
+
+
+def create_labeled_lung_lobes(
+    segmentation_dir: Union[str, Path],
+    output_path: Optional[Union[str, Path]] = None
+) -> Tuple[np.ndarray, Dict[int, float], Optional[np.ndarray]]:
+    """
+    创建带标签的肺叶 mask，每个肺叶有唯一的标签值
+
+    标签定义:
+        1 = 左上叶 (Left Upper Lobe)
+        2 = 左下叶 (Left Lower Lobe)
+        3 = 右上叶 (Right Upper Lobe)
+        4 = 右中叶 (Right Middle Lobe)
+        5 = 右下叶 (Right Lower Lobe)
+
+    Args:
+        segmentation_dir: TotalSegmentator 输出目录
+        output_path: 可选，保存带标签 mask 的路径
+
+    Returns:
+        labeled_mask: 带标签的肺叶 mask (uint8, 值为 0-5)
+        volume_stats: 每个肺叶的体积统计 (单位: mm³)
+        affine: NIfTI affine 矩阵
+    """
+    import nibabel as nib
+
+    segmentation_dir = Path(segmentation_dir)
+    labeled_mask = None
+    affine = None
+    voxel_volume = 1.0  # 默认体素体积 (mm³)
+    volume_stats = {}
+
+    # 遍历所有肺叶结构
+    for lobe_file, label_value in LOBE_LABELS.items():
+        lobe_path = segmentation_dir / f"{lobe_file}.nii.gz"
+
+        if lobe_path.exists():
+            nii = nib.load(str(lobe_path))
+            lobe_mask = np.asanyarray(nii.dataobj) > 0
+
+            if labeled_mask is None:
+                labeled_mask = np.zeros(lobe_mask.shape, dtype=np.uint8)
+                affine = nii.affine
+                # 计算体素体积 (mm³)
+                voxel_dims = np.abs(np.diag(affine)[:3])
+                voxel_volume = float(np.prod(voxel_dims))
+
+            # 分配标签值
+            labeled_mask[lobe_mask] = label_value
+
+            # 计算体积
+            voxel_count = np.sum(lobe_mask)
+            volume_mm3 = voxel_count * voxel_volume
+            volume_stats[label_value] = volume_mm3
+
+            logger.debug(f"加载 {LOBE_NAMES[label_value]}: {voxel_count} voxels, {volume_mm3:.1f} mm³")
+        else:
+            logger.warning(f"肺叶 mask 文件不存在: {lobe_path}")
+            volume_stats[label_value] = 0.0
+
+    if labeled_mask is None:
+        raise FileNotFoundError(f"未找到任何肺叶分割结果: {segmentation_dir}")
+
+    # 输出体积统计日志
+    logger.info("=" * 50)
+    logger.info("肺叶体积统计:")
+    total_volume = 0.0
+    for label, volume in sorted(volume_stats.items()):
+        lobe_name = LOBE_NAMES.get(label, f"未知({label})")
+        volume_ml = volume / 1000  # 转换为 mL
+        logger.info(f"  {lobe_name}: {volume_ml:.1f} mL ({volume:.0f} mm³)")
+        total_volume += volume
+    logger.info(f"  总肺容积: {total_volume/1000:.1f} mL")
+    logger.info("=" * 50)
+
+    # 保存带标签的 mask
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        save_nifti(labeled_mask, output_path, affine=affine, dtype='uint8')
+        logger.info(f"肺叶标签 mask 已保存: {output_path}")
+
+    return labeled_mask, volume_stats, affine
 
 
 # =============================================================================
@@ -261,7 +429,9 @@ def run_totalsegmentator_batch(
     fast: bool = False,
     skip_existing: bool = True,
     limit: Optional[int] = None,
-    background_hu: float = -1000
+    background_hu: float = -1000,
+    extract_trachea: bool = True,
+    create_labeled_lobes: bool = True
 ) -> Dict[str, List]:
     """
     使用 TotalSegmentator 批量分割
@@ -275,9 +445,17 @@ def run_totalsegmentator_batch(
         skip_existing: 是否跳过已处理的文件
         limit: 限制处理数量 (用于测试)
         background_hu: 背景 HU 值
+        extract_trachea: 是否提取气管树 mask
+        create_labeled_lobes: 是否创建带标签的肺叶 mask
 
     Returns:
         results: 处理结果字典 {"success": [], "failed": [], "skipped": []}
+
+    Output files:
+        - {stem}_mask.nii.gz: 二值肺部 mask
+        - {stem}_clean.nii.gz: 清洗后的 CT
+        - {stem}_trachea_mask.nii.gz: 气管树 mask (如果 extract_trachea=True)
+        - {stem}_lung_lobes_labeled.nii.gz: 带标签的肺叶 mask (如果 create_labeled_lobes=True)
     """
     import nibabel as nib
 
@@ -297,6 +475,8 @@ def run_totalsegmentator_batch(
         nifti_files = nifti_files[:limit]
 
     logger.info(f"找到 {len(nifti_files)} 个文件待处理")
+    logger.info(f"气管树分割: {'启用' if extract_trachea else '禁用'}")
+    logger.info(f"肺叶标记: {'启用' if create_labeled_lobes else '禁用'}")
 
     results = {"success": [], "failed": [], "skipped": []}
 
@@ -304,9 +484,17 @@ def run_totalsegmentator_batch(
         stem = nifti_path.name.replace('.nii.gz', '').replace('.nii', '')
         mask_path = mask_output_dir / f"{stem}_mask.nii.gz"
         clean_path = clean_output_dir / f"{stem}_clean.nii.gz"
+        trachea_path = mask_output_dir / f"{stem}_trachea_mask.nii.gz"
+        lobes_path = mask_output_dir / f"{stem}_lung_lobes_labeled.nii.gz"
 
-        # 检查是否已处理
-        if skip_existing and mask_path.exists() and clean_path.exists():
+        # 检查是否已处理（需要检查所有输出文件）
+        all_exist = mask_path.exists() and clean_path.exists()
+        if extract_trachea:
+            all_exist = all_exist and trachea_path.exists()
+        if create_labeled_lobes:
+            all_exist = all_exist and lobes_path.exists()
+
+        if skip_existing and all_exist:
             logger.info(f"[{i}/{len(nifti_files)}] 跳过已处理: {stem}")
             results["skipped"].append(stem)
             continue
@@ -319,10 +507,15 @@ def run_totalsegmentator_batch(
 
             cmd = ["TotalSegmentator", "-i", str(nifti_path), "-o", str(seg_output)]
 
-            # 仅分割肺部 (使用 -rs 参数指定 ROI)
-            cmd.extend(["-rs",
-                       "lung_upper_lobe_left", "lung_lower_lobe_left",
-                       "lung_upper_lobe_right", "lung_middle_lobe_right", "lung_lower_lobe_right"])
+            # 构建 ROI 列表：肺叶 + 气管（如果需要）
+            roi_list = [
+                "lung_upper_lobe_left", "lung_lower_lobe_left",
+                "lung_upper_lobe_right", "lung_middle_lobe_right", "lung_lower_lobe_right"
+            ]
+            if extract_trachea:
+                roi_list.append("trachea")
+
+            cmd.extend(["-rs"] + roi_list)
 
             if fast:
                 cmd.append("-f")
@@ -345,7 +538,7 @@ def run_totalsegmentator_batch(
                 error_msg = result.stderr if result.stderr else result.stdout
                 raise RuntimeError(f"TotalSegmentator 失败: {error_msg[:200]}")
 
-            # 合并肺叶 mask
+            # 合并肺叶 mask（二值）
             lung_parts = [
                 "lung_upper_lobe_left.nii.gz",
                 "lung_lower_lobe_left.nii.gz",
@@ -373,8 +566,22 @@ def run_totalsegmentator_batch(
 
             combined_mask = combined_mask.astype(np.uint8)
 
-            # 保存 mask
+            # 保存二值 mask
             save_nifti(combined_mask, mask_path, affine=affine, dtype='uint8')
+
+            # 提取气管树 mask
+            if extract_trachea:
+                trachea_mask, _ = extract_trachea_mask(seg_output, output_path=trachea_path)
+                if trachea_mask is not None:
+                    trachea_voxels = np.sum(trachea_mask)
+                    logger.info(f"    气管树体素数: {trachea_voxels}")
+                else:
+                    logger.warning(f"    气管树分割失败或未检测到")
+
+            # 创建带标签的肺叶 mask
+            if create_labeled_lobes:
+                # volume_stats 已在函数内部通过日志输出
+                create_labeled_lung_lobes(seg_output, output_path=lobes_path)
 
             # 加载原始 CT 并创建清洗后版本
             ct_data, ct_affine = load_nifti(nifti_path, return_affine=True)

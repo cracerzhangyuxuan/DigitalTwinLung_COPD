@@ -66,6 +66,20 @@ preprocessing:
         - "lung_middle_lobe_right"
         - "lung_lower_lobe_right"
 
+      # 气管树分割 (2025-12-22 新增)
+      extract_trachea: true      # 是否提取气管树 mask
+      trachea_structures:        # 气管相关结构
+        - "trachea"
+
+      # 肺叶精细标记 (2025-12-22 新增)
+      create_labeled_lobes: true # 是否创建带标签的肺叶 mask
+      lobe_labels:               # 肺叶标签定义
+        lung_upper_lobe_left: 1    # 左上叶
+        lung_lower_lobe_left: 2    # 左下叶
+        lung_upper_lobe_right: 3   # 右上叶
+        lung_middle_lobe_right: 4  # 右中叶
+        lung_lower_lobe_right: 5   # 右下叶
+
     # 阈值方法参数
     threshold:
       lower_hu: -1000            # 下限阈值 (HU)
