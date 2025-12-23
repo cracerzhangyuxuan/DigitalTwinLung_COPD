@@ -342,7 +342,7 @@ def generate_template_mask_from_inputs(
     probability_map = accumulated_mask / valid_count
     final_mask = (probability_map >= threshold).astype(np.uint8)
 
-    # 形态学清理
+    # 形态学清理（恢复原始参数）
     if ndimage is not None:
         from scipy.ndimage import binary_closing, binary_opening
         final_mask = binary_opening(final_mask, iterations=2).astype(np.uint8)
@@ -365,7 +365,7 @@ def generate_template_trachea_mask(
     input_image_paths: List[Union[str, Path]],
     input_trachea_paths: List[Union[str, Path]],
     output_trachea_path: Union[str, Path],
-    threshold: float = 0.5
+    threshold: float = 0.25  # 降低阈值以保留更多分支结构
 ) -> Optional[Path]:
     """
     从输入气管树 mask 配准生成模板气管树 mask
@@ -452,13 +452,14 @@ def generate_template_trachea_mask(
     probability_map = accumulated_mask / valid_count
     final_trachea_mask = (probability_map >= threshold).astype(np.uint8)
 
-    # 形态学清理
+    # 形态学清理（保守处理以保留分支结构）
     if ndimage is not None:
-        from scipy.ndimage import binary_closing, binary_opening
-        # 轻微开操作去噪
-        final_trachea_mask = binary_opening(final_trachea_mask, iterations=1).astype(np.uint8)
-        # 闭操作保持连续性
-        final_trachea_mask = binary_closing(final_trachea_mask, iterations=2).astype(np.uint8)
+        from scipy.ndimage import binary_closing, binary_dilation
+        # 仅使用闭操作保持连续性，不使用开操作（会移除细小分支）
+        final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
+        # 轻微膨胀以连接断裂的分支
+        final_trachea_mask = binary_dilation(final_trachea_mask, iterations=1).astype(np.uint8)
+        final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
 
     # 连通性验证
     if ndimage is not None:
@@ -578,20 +579,25 @@ def generate_template_lung_lobes(
         logger.error("没有有效的配准结果")
         return None
 
-    # 投票生成最终标签：每个体素取得票最多的标签
-    final_lobes = np.zeros(template_shape, dtype=np.uint8)
-
+    # 归一化投票
     for label in range(1, 6):
         lobe_accumulators[label] /= valid_count
 
-    # 对每个体素，选择投票数最高且超过阈值的标签
-    for z in range(template_shape[0]):
-        for y in range(template_shape[1]):
-            for x in range(template_shape[2]):
-                votes = [lobe_accumulators[l][z, y, x] for l in range(1, 6)]
-                max_vote = max(votes)
-                if max_vote >= threshold:
-                    final_lobes[z, y, x] = votes.index(max_vote) + 1
+    # 使用向量化操作进行投票（比三重循环快100倍以上）
+    logger.info("  使用向量化投票算法...")
+
+    # 将5个累积器堆叠成 (5, z, y, x) 的数组
+    vote_stack = np.stack([lobe_accumulators[l] for l in range(1, 6)], axis=0)
+
+    # 找到每个体素的最大投票值和对应标签
+    max_votes = np.max(vote_stack, axis=0)
+    argmax_labels = np.argmax(vote_stack, axis=0) + 1  # 标签从1开始
+
+    # 应用阈值
+    final_lobes = np.where(max_votes >= threshold, argmax_labels, 0).astype(np.uint8)
+
+    # 注意：不对肺叶进行额外的形态学后处理，保持原始投票结果
+    # 原始代码没有后处理，效果良好
 
     # 保存
     output_lobes_path = Path(output_lobes_path)
@@ -600,10 +606,10 @@ def generate_template_lung_lobes(
     save_nifti(final_lobes, output_lobes_path, affine=affine, dtype="uint8")
 
     # 统计每个肺叶的体素数
+    lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
     logger.info(f"肺叶模板已保存（从 {valid_count} 个输入生成）: {output_lobes_path}")
     for label in range(1, 6):
         count = np.sum(final_lobes == label)
-        lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
         logger.info(f"  {lobe_names[label]}: {count:,} 体素")
 
     return output_lobes_path
@@ -669,6 +675,274 @@ def validate_trachea_continuity(
         logger.warning(f"  ⚠️ {warning}")
 
     return result
+
+
+def validate_lung_lobes(
+    lobes_mask_path: Union[str, Path],
+    min_lobe_voxels: int = 100000,
+    max_lobe_ratio: float = 5.0
+) -> Dict:
+    """
+    验证肺叶标签 mask 的完整性和合理性
+
+    检查项：
+    1. 5 个肺叶是否都存在
+    2. 每个肺叶的体素数是否合理
+    3. 肺叶之间的大小比例是否正常
+
+    Args:
+        lobes_mask_path: 肺叶标签 mask 路径
+        min_lobe_voxels: 最小肺叶体素数（默认 100,000）
+        max_lobe_ratio: 最大/最小肺叶体积比上限（默认 5.0）
+
+    Returns:
+        validation_result: 验证结果字典
+    """
+    logger.info("验证肺叶标签完整性...")
+
+    result = {
+        'valid': True,
+        'checks': [],
+        'warnings': [],
+        'lobe_stats': {}
+    }
+
+    lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
+    lobes_path = Path(lobes_mask_path)
+
+    if not lobes_path.exists():
+        result['valid'] = False
+        result['warnings'].append(f"肺叶标签 mask 不存在: {lobes_path}")
+        return result
+
+    try:
+        lobes_data = load_nifti(lobes_path)
+
+        # 统计每个肺叶的体素数
+        lobe_counts = {}
+        missing_lobes = []
+        small_lobes = []
+
+        for label in range(1, 6):
+            count = np.sum(lobes_data == label)
+            lobe_counts[label] = count
+            result['lobe_stats'][lobe_names[label]] = count
+
+            if count == 0:
+                missing_lobes.append(lobe_names[label])
+            elif count < min_lobe_voxels:
+                small_lobes.append(f"{lobe_names[label]}({count:,})")
+
+        # 检查 1: 是否所有肺叶都存在
+        if missing_lobes:
+            result['valid'] = False
+            result['warnings'].append(f"缺失肺叶: {', '.join(missing_lobes)}")
+        else:
+            result['checks'].append("✓ 5 个肺叶全部存在")
+
+        # 检查 2: 肺叶大小是否合理
+        if small_lobes:
+            result['warnings'].append(f"体积过小的肺叶: {', '.join(small_lobes)}")
+
+        # 检查 3: 肺叶比例是否正常
+        valid_counts = [c for c in lobe_counts.values() if c > 0]
+        if len(valid_counts) >= 2:
+            ratio = max(valid_counts) / min(valid_counts)
+            if ratio > max_lobe_ratio:
+                result['warnings'].append(f"肺叶大小差异过大: 比例 {ratio:.1f}x")
+            else:
+                result['checks'].append(f"✓ 肺叶大小比例正常: {ratio:.1f}x")
+
+        # 检查 4: 左肺和右肺的分离（标签 1,2 为左肺，3,4,5 为右肺）
+        left_lung = (lobes_data == 1) | (lobes_data == 2)
+        right_lung = (lobes_data == 3) | (lobes_data == 4) | (lobes_data == 5)
+
+        left_count = np.sum(left_lung)
+        right_count = np.sum(right_lung)
+
+        if left_count > 0 and right_count > 0:
+            lr_ratio = max(left_count, right_count) / min(left_count, right_count)
+            if lr_ratio > 2.5:
+                result['warnings'].append(f"左右肺大小差异过大: {lr_ratio:.1f}x")
+            else:
+                result['checks'].append(f"✓ 左右肺比例正常: 左{left_count:,} / 右{right_count:,}")
+
+    except Exception as e:
+        result['valid'] = False
+        result['warnings'].append(f"读取肺叶标签 mask 失败: {e}")
+
+    # 输出结果
+    for check in result['checks']:
+        logger.info(f"  {check}")
+    for warning in result['warnings']:
+        logger.warning(f"  ⚠️ {warning}")
+
+    return result
+
+
+def validate_lung_separation(
+    lung_mask_path: Union[str, Path],
+    min_gap_ratio: float = 0.001
+) -> Dict:
+    """
+    验证左右肺的分离度
+
+    通过检查纵隔区域（肺的中间区域）是否有足够的间隙来判断分离度
+
+    Args:
+        lung_mask_path: 肺部 mask 路径
+        min_gap_ratio: 中间切片最小间隙比例（默认 0.1%）
+
+    Returns:
+        validation_result: 验证结果字典
+    """
+    logger.info("验证左右肺分离度...")
+
+    result = {
+        'valid': True,
+        'checks': [],
+        'warnings': [],
+        'separation_score': 0.0
+    }
+
+    mask_path = Path(lung_mask_path)
+
+    if not mask_path.exists():
+        result['valid'] = False
+        result['warnings'].append(f"肺部 mask 不存在: {mask_path}")
+        return result
+
+    try:
+        mask_data = load_nifti(mask_path)
+
+        # 检查中间 1/3 区域的分离度
+        # 假设 X 轴（第一个维度）是左右方向
+        shape = mask_data.shape
+
+        # 尝试不同的轴向来找到左右分离
+        best_separation = 0.0
+        best_axis = None
+
+        for axis in range(3):
+            mid_start = shape[axis] // 3
+            mid_end = 2 * shape[axis] // 3
+
+            # 提取中间切片
+            if axis == 0:
+                mid_region = mask_data[mid_start:mid_end, :, :]
+            elif axis == 1:
+                mid_region = mask_data[:, mid_start:mid_end, :]
+            else:
+                mid_region = mask_data[:, :, mid_start:mid_end]
+
+            # 计算每个切片的间隙
+            total_voxels = mid_region.size
+            lung_voxels = np.sum(mid_region > 0)
+            gap_voxels = total_voxels - lung_voxels
+
+            # 计算间隙比例
+            gap_ratio = gap_voxels / total_voxels if total_voxels > 0 else 0
+
+            if gap_ratio > best_separation:
+                best_separation = gap_ratio
+                best_axis = axis
+
+        result['separation_score'] = best_separation
+
+        # 检查纵隔中心线的间隙
+        center_axis = 0  # 假设 X 轴是左右方向
+        center_slice_idx = shape[center_axis] // 2
+        center_slice = mask_data[center_slice_idx, :, :]
+
+        # 计算中心切片的肺部占比
+        center_lung_ratio = np.sum(center_slice > 0) / center_slice.size if center_slice.size > 0 else 0
+
+        if center_lung_ratio > 0.8:
+            result['warnings'].append(f"中心切片肺部占比过高 ({center_lung_ratio:.1%})，可能存在粘连")
+        elif center_lung_ratio < 0.1:
+            result['checks'].append(f"✓ 纵隔间隙明显 (中心切片肺部占比 {center_lung_ratio:.1%})")
+        else:
+            result['checks'].append(f"✓ 左右肺分离度正常 (中心切片肺部占比 {center_lung_ratio:.1%})")
+
+        # 使用连通域分析检查是否真的分离
+        if ndimage is not None:
+            labeled, num_features = ndimage.label(mask_data > 0)
+            if num_features == 2:
+                result['checks'].append("✓ 检测到 2 个独立连通域（左右肺完全分离）")
+            elif num_features == 1:
+                result['warnings'].append("仅检测到 1 个连通域（左右肺可能粘连）")
+            else:
+                result['warnings'].append(f"检测到 {num_features} 个连通域（异常）")
+
+    except Exception as e:
+        result['valid'] = False
+        result['warnings'].append(f"读取肺部 mask 失败: {e}")
+
+    # 输出结果
+    for check in result['checks']:
+        logger.info(f"  {check}")
+    for warning in result['warnings']:
+        logger.warning(f"  ⚠️ {warning}")
+
+    return result
+
+
+def run_all_quality_checks(
+    output_dir: Union[str, Path]
+) -> Dict:
+    """
+    运行所有质量检查
+
+    Args:
+        output_dir: Atlas 输出目录
+
+    Returns:
+        combined_result: 综合检查结果
+    """
+    output_dir = Path(output_dir)
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("运行完整质量检查...")
+    logger.info("=" * 60)
+
+    results = {
+        'all_passed': True,
+        'trachea': None,
+        'lobes': None,
+        'separation': None,
+        'summary': []
+    }
+
+    # 1. 气管树检查
+    trachea_path = output_dir / 'standard_trachea_mask.nii.gz'
+    if trachea_path.exists():
+        results['trachea'] = validate_trachea_continuity(trachea_path)
+        if not results['trachea']['valid'] or results['trachea']['warnings']:
+            results['all_passed'] = False
+
+    # 2. 肺叶检查
+    lobes_path = output_dir / 'standard_lung_lobes_labeled.nii.gz'
+    if lobes_path.exists():
+        results['lobes'] = validate_lung_lobes(lobes_path)
+        if not results['lobes']['valid']:
+            results['all_passed'] = False
+
+    # 3. 肺分离度检查
+    mask_path = output_dir / 'standard_mask.nii.gz'
+    if mask_path.exists():
+        results['separation'] = validate_lung_separation(mask_path)
+        if not results['separation']['valid']:
+            results['all_passed'] = False
+
+    # 总结
+    logger.info("")
+    if results['all_passed']:
+        logger.info("✅ 所有质量检查通过")
+    else:
+        logger.warning("⚠️ 部分质量检查存在警告，请查看详细信息")
+
+    return results
 
 
 def evaluate_template_quality(
@@ -1216,6 +1490,9 @@ def main(
         except Exception as e:
             logger.warning(f"质量评估失败: {e}")
 
+    # 运行完整质量检查
+    quality_check_result = run_all_quality_checks(output_dir)
+
     total_elapsed = time.time() - total_start
 
     # 结果汇总
@@ -1230,6 +1507,7 @@ def main(
         'total_time_str': str(timedelta(seconds=int(total_elapsed))),
         'validation': validation_result,
         'evaluation': evaluation_result,
+        'quality_checks': quality_check_result,
         'has_trachea': trachea_result is not None,
         'has_lobes': lobes_result is not None
     }
