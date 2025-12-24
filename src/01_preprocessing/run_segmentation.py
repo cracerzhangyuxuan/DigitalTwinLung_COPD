@@ -584,9 +584,18 @@ def run_totalsegmentator_batch(
                 create_labeled_lung_lobes(seg_output, output_path=lobes_path)
 
             # 加载原始 CT 并创建清洗后版本
+            # 注意：保留区域 = 肺叶 + 气管树，确保配准时气管树可见
             ct_data, ct_affine = load_nifti(nifti_path, return_affine=True)
             ct_clean = ct_data.copy()
-            ct_clean[combined_mask == 0] = background_hu
+
+            # 构建保留区域 mask：肺叶 + 气管树
+            keep_mask = combined_mask.copy()
+            if extract_trachea and trachea_mask is not None:
+                # 将气管树也加入保留区域
+                keep_mask = keep_mask | (trachea_mask > 0)
+                logger.debug(f"    保留区域已包含气管树")
+
+            ct_clean[keep_mask == 0] = background_hu
             save_nifti(ct_clean, clean_path, affine=ct_affine)
 
             # 清理临时文件

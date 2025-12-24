@@ -26,13 +26,14 @@
 
 ```
 DigitalTwinLung_COPD/
-├── data/                    # 数据层
+├── data/                    # 数据层 (不纳入版本控制)
 ├── src/                     # 代码层
 ├── tests/                   # 测试层
 ├── notebooks/               # 实验层
-├── checkpoints/             # 模型权重
-├── logs/                    # 运行日志
+├── checkpoints/             # 模型权重 (不纳入版本控制)
+├── logs/                    # 运行日志 (不纳入版本控制)
 ├── docs/                    # 文档
+├── AeroPath/                # [可选] 第三方气管树分割模型 (不纳入版本控制)
 ├── config.yaml              # 全局配置
 ├── requirements.txt         # 依赖列表
 └── run_pipeline.py          # 主入口

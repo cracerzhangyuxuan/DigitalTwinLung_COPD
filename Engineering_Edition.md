@@ -16,6 +16,10 @@ DigitalTwinLung_COPD/
 ├── Engineering_Edition.md        # 项目数据策略与工程实施指南
 ├── v5_1_Final.md                 # 研究课题评估与实施方案
 │
+├── AeroPath/                     # [可选] 第三方气管树分割模型 (在 .gitignore 中忽略)
+│   # 克隆命令: git clone https://github.com/raidionics/AeroPath.git
+│   # 用途: 完整气管树分割（包含分支），替代 TotalSegmentator 的气管树分割
+│
 ├── data/                         # 【数据层】 (在 .gitignore 中忽略)
 │   ├── 00_raw/                   # 原始 NIfTI 数据 (Phase 2 后直接存储转换好的 NIfTI)
 │   │   ├── normal/               # 正常肺 CT (normal_001.nii.gz, ...)

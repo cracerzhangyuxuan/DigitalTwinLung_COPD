@@ -90,6 +90,12 @@ coverage.xml
 # ===== 渲染输出 (可选择性忽略) =====
 # data/04_final_viz/renders/
 
+# ===== 第三方模型仓库 (不纳入版本控制) =====
+# 气管树分割模型
+AeroPath/
+NaviAirway/
+MEDPSeg/
+
 __pycache__/
 *.DS_Store
 *.dcm
