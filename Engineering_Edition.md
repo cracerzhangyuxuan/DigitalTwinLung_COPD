@@ -1,10 +1,11 @@
-项目数据策略与工程实施指南 (v6.2 Engineering Edition)
-课题名称： 基于全代码自动化的COPD数字孪生肺构建与3D可视化研究 适用场景： 硕士毕业设计 / 科研项目开发 技术栈： Python, LungMask, Raidionicsrads, ANTsPy, PyTorch, PyVista 更新日期： 2025年12月24日
+项目数据策略与工程实施指南 (v6.3 Engineering Edition)
+课题名称： 基于全代码自动化的COPD数字孪生肺构建与3D可视化研究 适用场景： 硕士毕业设计 / 科研项目开发 技术栈： Python, LungMask, TotalSegmentator, ANTsPy, PyTorch, PyVista 更新日期： 2025年12月25日
 
-> **重要更新 (2025-12-24)**：已将 TotalSegmentator 替换为 LungMask + Raidionicsrads
+> **重要更新 (2025-12-25)**：分割方案
 > - 肺叶分割：LungMask LTRCLobes_R231（边界清晰，支持病理肺）
-> - 气管树分割：Raidionicsrads AGU-Net（3-4级支气管，分支完整）
-> - 替换原因：TotalSegmentator 气管树仅分割主气管，肺叶边界碎片化
+> - 气管树分割：TotalSegmentator `--task lung_vessels`（完整支气管树 3-4 级分支）
+>   - 默认 `--task total` 仅输出主气管 `trachea.nii.gz`
+>   - `--task lung_vessels` 输出 `lung_trachea_bronchia.nii.gz`（完整支气管树）
 
 ---
 
@@ -22,8 +23,8 @@ DigitalTwinLung_COPD/
 ├── v5_1_Final.md                 # 研究课题评估与实施方案
 │
 ├── AeroPath/                     # [已弃用] 第三方气管树分割模型
-│   # 注意: 已改用 Raidionicsrads (pip install raidionicsrads)
-│   # 无需克隆此仓库，Raidionicsrads 会自动下载预训练权重
+│   # 注意: 已改用 TotalSegmentator --task lung_vessels
+│   # 无需克隆此仓库
 │
 ├── data/                         # 【数据层】 (在 .gitignore 中忽略)
 │   ├── 00_raw/                   # 原始 NIfTI 数据 (Phase 2 后直接存储转换好的 NIfTI)
@@ -83,16 +84,16 @@ DigitalTwinLung_COPD/
 │   │
 │   ├── 01_preprocessing/         # 阶段一：清洗与特征提取
 │   │   ├── __init__.py
-│   │   ├── run_segmentation.py   # 分割模块（LungMask + Raidionicsrads）
+│   │   ├── run_segmentation.py   # 分割模块（LungMask + TotalSegmentator）
 │   │   ├── clean_background.py   # 去除骨骼背景
 │   │   ├── simple_lung_segment.py # 简单肺分割（阈值法）
 │   │   ├── precise_lung_segment.py # [新增] 精确肺分割（纯净度 99.5%）
 │   │   └── extract_emphysema.py  # LAA-950 算法提取病灶 Mask（含气道排除）
-│   │   # [2025-12-24 更新] 分割模型替换
+│   │   # [2025-12-25 更新] 分割模型
 │   │   # - segment_lung_lobes_lungmask(): LungMask 肺叶分割（推荐）
-│   │   # - segment_airway_raidionics(): Raidionicsrads 气管树分割（推荐）
+│   │   # - segment_airway_totalsegmentator(): TotalSegmentator lung_vessels 气管树分割（推荐）
 │   │   # - run_lungmask_batch(): 批量分割入口（推荐）
-│   │   # - extract_trachea_mask(): [已弃用] TotalSegmentator 气管树
+│   │   # - extract_trachea_mask(): [已弃用] TotalSegmentator total 任务
 │   │   # - create_labeled_lung_lobes(): [已弃用] TotalSegmentator 肺叶
 │   │
 │   ├── 02_atlas_build/           # 阶段二：底座构建
@@ -187,7 +188,7 @@ DigitalTwinLung_COPD/
 1.环境配置：
 
 * 安装 Python 3.9+, PyTorch, ANTsPy, PyVista。
-* 安装分割模型：`pip install lungmask raidionicsrads`
+* 安装分割模型：`pip install lungmask TotalSegmentator`
 * 编写 requirements.txt。
 
 2.数据清洗：
@@ -248,18 +249,18 @@ laa_percentage, stats = extract_emphysema_mask(
 | LAA-950 百分比 | 0.38% | 0.24% | 更准确 |
 | 病灶体素数 | 109,122 | 21,360 | -80% (排除气道) |
 
-**Phase 2 新增功能 (2025-12-24 更新)**
+**Phase 2 新增功能 (2025-12-25 更新)**
 
 | 功能 | 函数 | 说明 |
 | :--- | :--- | :--- |
 | 肺叶分割 | `segment_lung_lobes_lungmask()` | LungMask LTRCLobes_R231，边界清晰 |
-| 气管树分割 | `segment_airway_raidionics()` | Raidionicsrads AGU-Net，3-4级支气管 |
+| 气管树分割 | `segment_airway_totalsegmentator()` | TotalSegmentator lung_vessels，完整支气管树 3-4 级分支 |
 | 批量分割 | `run_lungmask_batch()` | 推荐入口，自动调用上述两个函数 |
 | 气管树模板生成 | `generate_template_trachea_mask()` | 配准生成标准气管树 mask |
 | 气管树连续性验证 | `validate_trachea_continuity()` | 检查气管树的连通性和解剖合理性 |
 
 > **已弃用函数**（保留用于兼容性）：
-> - `extract_trachea_mask()`: TotalSegmentator 气管树，仅主气管
+> - `extract_trachea_mask()`: TotalSegmentator --task total，仅主气管
 > - `create_labeled_lung_lobes()`: TotalSegmentator 肺叶，边界碎片化
 > - `run_totalsegmentator_batch()`: TotalSegmentator 批量分割
 
@@ -275,12 +276,12 @@ laa_percentage, stats = extract_emphysema_mask(
 
 > **注意**：LungMask 的标签值与项目定义完全一致，无需转换！
 
-**分割示例代码 (2025-12-24 更新)**
+**分割示例代码 (2025-12-25 更新)**
 
 ```python
 from src.01_preprocessing.run_segmentation import (
     segment_lung_lobes_lungmask,
-    segment_airway_raidionics,
+    segment_airway_totalsegmentator,
     run_lungmask_batch
 )
 
@@ -292,10 +293,11 @@ labeled_lobes, volume_stats, affine = segment_lung_lobes_lungmask(
 )
 # volume_stats: {1: 1234.5, 2: 987.6, ...}  # 单位: mm³
 
-# 方式 2: 单例气管树分割 (Raidionicsrads)
-trachea_mask, affine = segment_airway_raidionics(
+# 方式 2: 单例气管树分割 (TotalSegmentator lung_vessels)
+trachea_mask, affine = segment_airway_totalsegmentator(
     input_path="input.nii.gz",
-    output_path="output/trachea_mask.nii.gz"
+    output_path="output/trachea_mask.nii.gz",
+    device="gpu"  # 或 "cpu"
 )
 
 # 方式 3: 批量分割 (推荐)
@@ -303,8 +305,8 @@ results = run_lungmask_batch(
     input_dir="data/00_raw/normal",
     mask_output_dir="data/01_cleaned/normal_mask",
     clean_output_dir="data/01_cleaned/normal_clean",
-    extract_trachea=True,       # 启用气管树分割
-    create_labeled_lobes=True,  # 启用肺叶标签
+    extract_trachea=True,       # 启用气管树分割 (TotalSegmentator lung_vessels)
+    create_labeled_lobes=True,  # 启用肺叶标签 (LungMask)
     use_fusion=True             # 使用融合模型
 )
 ```

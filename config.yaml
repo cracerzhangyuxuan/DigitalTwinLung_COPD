@@ -44,20 +44,21 @@ data_format:
 
 # ----- 预处理参数 -----
 preprocessing:
-  # 肺部分割配置 (2025-12-24 更新)
-  # 重要：已将 TotalSegmentator 替换为 LungMask + Raidionicsrads
-  # 原因：TotalSegmentator 气管树仅分割主气管，肺叶边界碎片化
+  # 肺部分割配置 (2025-12-25 更新)
+  # 分割方案：
+  # - 肺叶分割：LungMask LTRCLobes_R231（边界清晰）
+  # - 气管树分割：TotalSegmentator --task lung_vessels（完整支气管树 3-4 级分支）
   segmentation:
     # 分割方法: auto, lungmask, threshold
     # - auto: 自动选择（优先 LungMask GPU，回退到 threshold）
-    # - lungmask: LungMask + Raidionicsrads（推荐，高精度）
+    # - lungmask: LungMask + TotalSegmentator（推荐，高精度）
     # - threshold: 阈值方法（轻量 CPU，用于无 GPU 环境）
     method: "auto"
 
     # 设备配置: gpu, cpu
     device: "gpu"
 
-    # LungMask 参数 (2025-12-24 新增)
+    # LungMask 参数（肺叶分割）
     lungmask:
       # 肺叶分割模型
       model: "LTRCLobes"         # 模型名称
@@ -65,13 +66,14 @@ preprocessing:
       use_fusion: true           # 是否使用融合模型（推荐）
       batch_size: 20             # 批处理大小（GPU 显存不足时减小）
 
-    # Raidionicsrads 参数 (2025-12-24 新增)
-    raidionicsrads:
-      task: "airways"            # 分割任务类型
-      # 注意：首次运行会自动下载预训练权重
+    # TotalSegmentator 参数（气管树分割）(2025-12-25 更新)
+    totalsegmentator:
+      task: "lung_vessels"       # 使用 lung_vessels 任务（非 total）
+      # lung_vessels 输出 lung_trachea_bronchia.nii.gz（完整支气管树）
+      # total 仅输出 trachea.nii.gz（主气管）
 
     # 气管树分割
-    extract_trachea: true        # 是否提取气管树 mask (使用 Raidionicsrads)
+    extract_trachea: true        # 是否提取气管树 mask (使用 TotalSegmentator lung_vessels)
 
     # 肺叶精细标记
     create_labeled_lobes: true   # 是否创建带标签的肺叶 mask (使用 LungMask)

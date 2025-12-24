@@ -18,14 +18,16 @@
 | 模块 | 技术 | 作用 |
 |------|------|------|
 | 肺叶分割 | LungMask (LTRCLobes_R231) | 5肺叶精细分割，边界清晰 |
-| 气管树分割 | Raidionicsrads (AGU-Net) | 3-4级支气管分割 |
+| 气管树分割 | TotalSegmentator (lung_vessels) | 完整支气管树 3-4 级分支 |
 | 配准 | ANTsPy (SyN) | 非线性空间映射 |
 | AI融合 | PyTorch (U-Net) | 病灶纹理Inpainting |
 | 可视化 | PyVista (VTK) | 3D体渲染 |
 
-> **注意**：2025-12-24 更新，已将 TotalSegmentator 替换为 LungMask + Raidionicsrads，原因：
-> - TotalSegmentator 气管树分割仅能分割主气管，缺少分支结构
-> - TotalSegmentator 肺叶分割边界碎片化严重
+> **注意**：2025-12-25 更新
+> - 肺叶分割：LungMask LTRCLobes_R231（边界清晰，支持病理肺）
+> - 气管树分割：TotalSegmentator `--task lung_vessels`（完整支气管树）
+>   - 默认 `--task total` 仅输出主气管
+>   - `--task lung_vessels` 输出 `lung_trachea_bronchia.nii.gz`（3-4 级分支）
 
 ## 📁 项目结构
 
@@ -76,20 +78,22 @@ LungMask 特点：
 - 支持正常肺和病理肺（COPD、COVID-19等）
 - GPU 加速，单例 5-10 秒
 
-#### 1.2 气管树分割模型 (Raidionicsrads)
+#### 1.2 气管树分割 (TotalSegmentator lung_vessels)
 
 ```bash
-# 安装 Raidionicsrads
-pip install raidionicsrads
+# TotalSegmentator 已在 requirements.txt 中，无需单独安装
 
 # 验证安装
-python -c "from raidionicsrads.compute import run_model; print('Raidionicsrads 安装成功')"
+TotalSegmentator --version
+
+# 关键：使用 lung_vessels 任务（非默认的 total 任务）
+TotalSegmentator -i input.nii.gz -o output_dir/ --task lung_vessels --device gpu
 ```
 
-Raidionicsrads 特点：
-- 基于 AGU-Net 架构，可分割到 3-4 级支气管
-- 分支结构完整，适合气管树模板构建
-- 首次运行自动下载预训练权重
+TotalSegmentator lung_vessels 任务特点：
+- 输出 `lung_trachea_bronchia.nii.gz`（完整支气管树 3-4 级分支）
+- 比默认 `--task total` 的 `trachea.nii.gz`（仅主气管）质量更高
+- GPU 加速，单例约 1-2 分钟
 
 ### 2. 数据准备
 

@@ -4,23 +4,25 @@
 肺部分割模块
 
 =============================================================================
-重要更新 (2025-12-24):
+重要更新 (2025-12-25):
 =============================================================================
-由于 TotalSegmentator 在气管树和肺叶分割上存在以下问题：
-1. 气管树分割质量差：仅能分割主气管，缺少分支结构
-2. 肺叶分割边界碎片化：5 个肺叶之间的边界出现不连续的碎片
+分割方案：
+- 肺叶分割：LungMask (LTRCLobes_R231) - 边界质量高，支持病理肺 ✅
+- 气管树分割：TotalSegmentator --task lung_vessels ✅
+  (使用 lung_vessels 任务而非默认 total 任务，可获得完整支气管树 3-4 级分支)
 
-因此本模块已替换为专用模型：
-- 气管树分割：Raidionicsrads (AGU-Net) - 分支检测能力强，可达 3-4 级支气管
-- 肺叶分割：LungMask (LTRCLobes_R231) - 边界质量高，支持病理肺
+TotalSegmentator 任务对比：
+- --task total：仅输出 trachea.nii.gz（主气管）
+- --task lung_vessels：输出 lung_trachea_bronchia.nii.gz（完整支气管树）
 
-原 TotalSegmentator 代码已保留但标记为"已弃用"，不再调用。
+已移除 Raidionicsrads：该包仅支持 neuro_diagnosis 和 mediastinum_diagnosis，
+不支持 airways_segmentation 任务。
 =============================================================================
 
 支持功能：
-- GPU 加速分割（LungMask + Raidionicsrads）
+- GPU 加速分割（LungMask + TotalSegmentator）
 - CPU 阈值分割（备选方案）
-- 气管树分割（Raidionicsrads AGU-Net）
+- 气管树分割（TotalSegmentator lung_vessels 任务）
 - 肺叶精细标记（LungMask LTRCLobes，5个肺叶独立标签）
 - 批量处理
 - 环境检查
@@ -30,6 +32,7 @@
 更新: 2025-12-14 - 整合 GPU 分割功能
 更新: 2025-12-22 - 添加气管树分割和肺叶精细标记功能
 更新: 2025-12-24 - 替换 TotalSegmentator 为 LungMask + Raidionicsrads
+更新: 2025-12-25 - 气管树分割改用 TotalSegmentator lung_vessels 任务
 """
 
 import shutil
@@ -197,28 +200,32 @@ def ensure_lungmask_models_ready() -> bool:
     return True
 
 
-def check_raidionicsrads_available() -> Tuple[bool, str]:
+def check_totalsegmentator_lung_vessels_available() -> Tuple[bool, str]:
     """
-    检查 Raidionicsrads 是否可用（用于气管树分割）
+    检查 TotalSegmentator lung_vessels 任务是否可用（用于气管树分割）
 
-    正确的 API: from raidionicsrads.compute import run_rads
+    lung_vessels 任务输出包含完整的支气管树（3-4 级分支），
+    比默认的 total 任务（仅主气管）质量更高。
 
     Returns:
         (is_available, message): 可用性和描述信息
     """
     try:
-        # 检查正确的 API
-        from raidionicsrads.compute import run_rads
-        return True, "Raidionicsrads 可用 (run_rads API)"
-    except ImportError:
-        try:
-            # 检查包是否至少已安装
-            import raidionicsrads
-            return False, "Raidionicsrads 已安装但 API 不完整"
-        except ImportError:
-            return False, "Raidionicsrads 未安装，请运行: pip install raidionicsrads"
+        result = subprocess.run(
+            ["TotalSegmentator", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            return True, "TotalSegmentator 可用 (支持 lung_vessels 任务)"
+        return False, "TotalSegmentator 命令执行失败"
+    except FileNotFoundError:
+        return False, "TotalSegmentator 未安装，请运行: pip install TotalSegmentator"
+    except subprocess.TimeoutExpired:
+        return False, "TotalSegmentator 响应超时"
     except Exception as e:
-        return False, f"Raidionicsrads 检查失败: {e}"
+        return False, f"检查失败: {e}"
 
 
 def check_totalsegmentator_available() -> Tuple[bool, str]:
@@ -285,8 +292,8 @@ def check_segmentation_environment() -> Dict[str, Tuple[bool, str]]:
     results = {
         "gpu": check_gpu_available(),
         "lungmask": check_lungmask_available(),
-        "raidionicsrads": check_raidionicsrads_available(),
-        "totalsegmentator": check_totalsegmentator_available(),  # 仅用于兼容性检查
+        "totalsegmentator_lung_vessels": check_totalsegmentator_lung_vessels_available(),
+        "totalsegmentator": check_totalsegmentator_available(),
     }
 
     # 输出检查结果
@@ -612,23 +619,24 @@ def segment_lung_lobes_lungmask(
     return labeled_mask, volume_stats, affine
 
 
-def segment_airway_raidionics(
+def segment_airway_totalsegmentator(
     input_path: Union[str, Path],
     output_path: Optional[Union[str, Path]] = None,
-    temp_dir: Optional[Union[str, Path]] = None
+    device: str = "gpu",
+    fast: bool = False
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    使用 Raidionicsrads (AGU-Net) 进行气管树分割
+    使用 TotalSegmentator lung_vessels 任务进行气管树分割
 
-    Raidionicsrads 特点：
-    - 可分割到 3-4 级支气管
-    - 分支结构完整
-    - 支持正常肺和病理肺
+    重要：使用 --task lung_vessels 而非默认的 --task total
+    - total 任务：仅输出 trachea.nii.gz（主气管）
+    - lung_vessels 任务：输出 lung_trachea_bronchia.nii.gz（完整支气管树 3-4 级分支）
 
     Args:
         input_path: 输入 CT 文件路径 (NIfTI 格式)
         output_path: 可选，保存气管树 mask 的路径
-        temp_dir: 临时目录（用于存放中间结果）
+        device: 设备选择 ("gpu" 或 "cpu")
+        fast: 是否使用快速模式（精度略低但速度更快）
 
     Returns:
         trachea_mask: 气管树 mask (uint8)
@@ -640,118 +648,69 @@ def segment_airway_raidionics(
     input_path = Path(input_path)
     start_time = time.time()
 
-    logger.info(f"[Raidionicsrads] 开始气管树分割: {input_path.name}")
+    logger.info(f"[TotalSegmentator] 开始气管树分割 (lung_vessels 任务): {input_path.name}")
 
-    # 创建临时目录
-    if temp_dir is None:
-        temp_dir = Path(tempfile.mkdtemp(prefix="raidionics_"))
-    else:
-        temp_dir = Path(temp_dir)
-        temp_dir.mkdir(parents=True, exist_ok=True)
+    # 创建临时目录存放分割结果
+    temp_dir = Path(tempfile.mkdtemp(prefix="totalseg_airways_"))
 
     try:
-        # =========================================================
-        # Raidionicsrads API: from raidionicsrads.compute import run_rads
-        # 命令行模式需要 .ini 配置文件
-        # =========================================================
-
-        # 方式 1: 直接使用 Python API (推荐)
-        try:
-            from raidionicsrads.compute import run_rads
-
-            # 创建 .ini 配置文件
-            config_path = temp_dir / "rads_config.ini"
-            config_content = f"""[Default]
-task = airways_segmentation
-input_filename = {input_path}
-output_folder = {temp_dir}
-gpu_id = 0
-
-[Neuro]
-
-[Mediastinum]
-"""
-            with open(config_path, 'w') as f:
-                f.write(config_content)
-
-            logger.info(f"[Raidionicsrads] 使用 Python API (run_rads)")
-            logger.info(f"[Raidionicsrads] 配置文件: {config_path}")
-
-            # 调用 run_rads
-            run_rads(config_filename=str(config_path))
-
-        except ImportError as e:
-            logger.warning(f"[Raidionicsrads] Python API 导入失败: {e}")
-
-            # 方式 2: 尝试命令行调用
-            config_path = temp_dir / "rads_config.ini"
-            config_content = f"""[Default]
-task = airways_segmentation
-input_filename = {input_path}
-output_folder = {temp_dir}
-gpu_id = 0
-
-[Neuro]
-
-[Mediastinum]
-"""
-            with open(config_path, 'w') as f:
-                f.write(config_content)
-
-            cmd = ["python", "-m", "raidionicsrads", str(config_path), "--verbose", "info"]
-            logger.info(f"[Raidionicsrads] 执行命令: {' '.join(cmd)}")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-
-            if result.returncode != 0:
-                logger.warning(f"[Raidionicsrads] 命令行调用失败: {result.stderr[:500]}")
-                logger.warning("[Raidionicsrads] 气管树分割已跳过")
-                return None, None
-
-        # 查找输出文件
-        # Raidionicsrads 输出文件名格式可能是：
-        # - {stem}_airways.nii.gz
-        # - Segmentation-airways.nii.gz
-        # - airways_mask.nii.gz
-        possible_outputs = [
-            temp_dir / "airways_mask.nii.gz",
-            temp_dir / f"{input_path.stem}_airways.nii.gz",
-            temp_dir / f"{input_path.stem.replace('.nii', '')}_Segmentation-airways.nii.gz",
-            temp_dir / "Segmentation-airways.nii.gz",
-            temp_dir / "airways.nii.gz",
+        # 构建 TotalSegmentator 命令
+        # 关键：使用 --task lung_vessels 获取完整支气管树
+        cmd = [
+            "TotalSegmentator",
+            "-i", str(input_path),
+            "-o", str(temp_dir),
+            "--task", "lung_vessels",  # 关键参数！获取完整支气管树
         ]
 
-        airway_file = None
-        for p in possible_outputs:
-            if p.exists():
-                airway_file = p
-                break
+        # 设备选择
+        if device.lower() == "cpu":
+            cmd.extend(["--device", "cpu"])
+        else:
+            cmd.extend(["--device", "gpu"])
 
-        # 如果没找到，递归搜索目录
-        if airway_file is None:
-            for pattern in ["**/*airways*.nii.gz", "**/*Airway*.nii.gz", "**/Segmentation*.nii.gz"]:
-                matches = list(temp_dir.glob(pattern))
-                if matches:
-                    airway_file = matches[0]
-                    break
+        # 快速模式
+        if fast:
+            cmd.append("--fast")
 
-        # 最后尝试找任意 nii.gz 文件
-        if airway_file is None:
-            nii_files = list(temp_dir.rglob("*.nii.gz"))
-            if nii_files:
-                airway_file = nii_files[0]
+        logger.info(f"[TotalSegmentator] 执行命令: {' '.join(cmd)}")
 
-        if airway_file is None:
-            # 列出目录中的所有文件帮助调试
-            all_files = list(temp_dir.rglob("*"))
-            logger.warning(f"[Raidionicsrads] 未找到气管树分割结果")
-            logger.warning(f"[Raidionicsrads] 输出目录内容: {[str(f.relative_to(temp_dir)) for f in all_files[:10]]}")
+        # 运行 TotalSegmentator
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=1800  # 30 分钟超时
+        )
+
+        if result.returncode != 0:
+            logger.error(f"[TotalSegmentator] 命令执行失败")
+            logger.error(f"[TotalSegmentator] stderr: {result.stderr[:500]}")
             return None, None
 
-        logger.info(f"[Raidionicsrads] 找到输出文件: {airway_file.name}")
+        # 查找支气管树输出文件
+        # lung_vessels 任务输出 lung_trachea_bronchia.nii.gz
+        bronchia_path = temp_dir / "lung_trachea_bronchia.nii.gz"
+
+        if not bronchia_path.exists():
+            # 列出实际输出的文件帮助调试
+            output_files = list(temp_dir.glob("*.nii.gz"))
+            logger.warning(f"[TotalSegmentator] 未找到 lung_trachea_bronchia.nii.gz")
+            logger.warning(f"[TotalSegmentator] 实际输出文件: {[f.name for f in output_files]}")
+
+            # 尝试其他可能的文件名
+            for alt_name in ["trachea.nii.gz", "bronchi.nii.gz", "airways.nii.gz"]:
+                alt_path = temp_dir / alt_name
+                if alt_path.exists():
+                    bronchia_path = alt_path
+                    logger.info(f"[TotalSegmentator] 使用替代文件: {alt_name}")
+                    break
+            else:
+                return None, None
 
         # 加载结果
-        nii = nib.load(str(airway_file))
+        logger.info(f"[TotalSegmentator] 加载输出文件: {bronchia_path.name}")
+        nii = nib.load(str(bronchia_path))
         trachea_mask = np.asanyarray(nii.dataobj) > 0
         trachea_mask = trachea_mask.astype(np.uint8)
         affine = nii.affine
@@ -762,31 +721,35 @@ gpu_id = 0
         voxel_volume = float(np.prod(voxel_dims))
         volume_ml = voxel_count * voxel_volume / 1000
 
-        logger.info(f"[Raidionicsrads] 气管树体素数: {voxel_count}, 体积: {volume_ml:.1f} mL")
+        logger.info(f"[TotalSegmentator] 气管树体素数: {voxel_count:,}, 体积: {volume_ml:.1f} mL")
 
         # 保存结果
         if output_path is not None:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             save_nifti(trachea_mask, output_path, affine=affine, dtype='uint8')
-            logger.info(f"[Raidionicsrads] 气管树 mask 已保存: {output_path}")
+            logger.info(f"[TotalSegmentator] 气管树 mask 已保存: {output_path}")
 
         elapsed = time.time() - start_time
-        logger.info(f"[Raidionicsrads] 分割完成，耗时: {elapsed:.1f}s")
+        logger.info(f"[TotalSegmentator] 分割完成，耗时: {elapsed:.1f}s")
 
         return trachea_mask, affine
 
     except subprocess.TimeoutExpired:
-        logger.warning("[Raidionicsrads] 执行超时（>10分钟）")
-        logger.warning("[Raidionicsrads] 气管树分割已跳过")
+        logger.error("[TotalSegmentator] 执行超时（>30分钟）")
+        return None, None
+    except FileNotFoundError:
+        logger.error("[TotalSegmentator] 未找到 TotalSegmentator 命令")
+        logger.error("[TotalSegmentator] 请安装: pip install TotalSegmentator")
         return None, None
     except Exception as e:
-        logger.warning(f"[Raidionicsrads] 分割失败: {e}")
-        logger.warning("[Raidionicsrads] 气管树分割已跳过，将只使用肺叶分割结果")
+        logger.error(f"[TotalSegmentator] 分割失败: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return None, None
     finally:
         # 清理临时文件
-        if temp_dir.exists() and temp_dir.name.startswith("raidionics_"):
+        if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -949,7 +912,7 @@ def create_labeled_lung_lobes(
 
 
 # =============================================================================
-# 新版批量处理函数（LungMask + Raidionicsrads）
+# 新版批量处理函数（LungMask + TotalSegmentator lung_vessels）
 # =============================================================================
 
 def run_lungmask_batch(
@@ -965,15 +928,15 @@ def run_lungmask_batch(
     use_fusion: bool = True
 ) -> Dict[str, List]:
     """
-    使用 LungMask + Raidionicsrads 批量分割（推荐方案）
+    使用 LungMask + TotalSegmentator 批量分割（推荐方案）
 
-    替代 TotalSegmentator 的原因：
-    1. 气管树分割：TotalSegmentator 仅能分割主气管，缺少分支结构
-    2. 肺叶分割：TotalSegmentator 边界碎片化严重
+    分割方案：
+    - 肺叶分割：LungMask LTRCLobes_R231（边界清晰，支持病理肺）
+    - 气管树分割：TotalSegmentator --task lung_vessels（完整支气管树 3-4 级分支）
 
-    新方案优势：
-    - LungMask LTRCLobes_R231：肺叶边界清晰，支持病理肺
-    - Raidionicsrads AGU-Net：气管树分支完整，可达 3-4 级支气管
+    关于 TotalSegmentator 任务选择：
+    - --task total（默认）：仅输出 trachea.nii.gz（主气管）
+    - --task lung_vessels：输出 lung_trachea_bronchia.nii.gz（完整支气管树）
 
     Args:
         input_dir: 输入目录
@@ -983,7 +946,7 @@ def run_lungmask_batch(
         skip_existing: 是否跳过已处理的文件
         limit: 限制处理数量 (用于测试)
         background_hu: 背景 HU 值
-        extract_trachea: 是否提取气管树 mask (使用 Raidionicsrads)
+        extract_trachea: 是否提取气管树 mask (使用 TotalSegmentator lung_vessels)
         create_labeled_lobes: 是否创建带标签的肺叶 mask (使用 LungMask)
         use_fusion: 是否使用 LungMask 融合模型 (LTRCLobes_R231)
 
@@ -993,7 +956,7 @@ def run_lungmask_batch(
     Output files:
         - {stem}_mask.nii.gz: 二值肺部 mask
         - {stem}_clean.nii.gz: 清洗后的 CT
-        - {stem}_trachea_mask.nii.gz: 气管树 mask (Raidionicsrads)
+        - {stem}_trachea_mask.nii.gz: 气管树 mask (TotalSegmentator lung_vessels)
         - {stem}_lung_lobes_labeled.nii.gz: 带标签的肺叶 mask (LungMask)
     """
     import nibabel as nib
@@ -1010,12 +973,12 @@ def run_lungmask_batch(
         nifti_files = nifti_files[:limit]
 
     logger.info("=" * 60)
-    logger.info("批量分割配置 (LungMask + Raidionicsrads)")
+    logger.info("批量分割配置 (LungMask + TotalSegmentator lung_vessels)")
     logger.info("=" * 60)
     logger.info(f"  输入目录: {input_dir}")
     logger.info(f"  文件数量: {len(nifti_files)}")
     logger.info(f"  肺叶分割: {'启用 (LungMask)' if create_labeled_lobes else '禁用'}")
-    logger.info(f"  气管树分割: {'启用 (Raidionicsrads)' if extract_trachea else '禁用'}")
+    logger.info(f"  气管树分割: {'启用 (TotalSegmentator lung_vessels)' if extract_trachea else '禁用'}")
     logger.info(f"  融合模型: {'LTRCLobes_R231' if use_fusion else 'LTRCLobes'}")
     logger.info(f"  设备: {'CPU' if force_cpu else 'GPU (如可用)'}")
     logger.info("=" * 60)
@@ -1106,12 +1069,16 @@ def run_lungmask_batch(
             save_nifti(binary_mask, mask_path, affine=affine, dtype='uint8')
             logger.info(f"    二值 mask 已保存: {mask_path.name}")
 
-            # ===== 步骤 2: 使用 Raidionicsrads 进行气管树分割 =====
+            # ===== 步骤 2: 使用 TotalSegmentator lung_vessels 进行气管树分割 =====
             trachea_mask = None
             if extract_trachea:
-                trachea_mask, _ = segment_airway_raidionics(
+                # 使用 --task lung_vessels 获取完整支气管树（3-4 级分支）
+                # 比默认的 --task total（仅主气管）质量更高
+                device_str = "cpu" if force_cpu else "gpu"
+                trachea_mask, _ = segment_airway_totalsegmentator(
                     input_path=nifti_path,
-                    output_path=trachea_path
+                    output_path=trachea_path,
+                    device=device_str
                 )
 
             # ===== 步骤 3: 创建清洗后的 CT =====

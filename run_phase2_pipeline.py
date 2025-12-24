@@ -277,7 +277,7 @@ def run_segmentation(config: dict, logger: logging.Logger,
             force_cpu=force_cpu,
             skip_existing=not force,  # force=True 时不跳过
             limit=process_limit,
-            extract_trachea=True,       # 启用气管树分割 (Raidionicsrads)
+            extract_trachea=True,       # 启用气管树分割 (TotalSegmentator --task lung_vessels)
             create_labeled_lobes=True,  # 启用5肺叶标签 (LungMask)
             use_fusion=True             # 使用 LTRCLobes_R231 融合模型
         )
