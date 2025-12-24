@@ -84,18 +84,139 @@ def check_lungmask_available() -> Tuple[bool, str]:
         return False, f"LungMask 检查失败: {e}"
 
 
+# LungMask 模型文件信息（用于校验）
+LUNGMASK_MODELS = {
+    "unet_ltrclobes-3a07043d.pth": {
+        "url": "https://github.com/JoHof/lungmask/releases/download/v0.0/unet_ltrclobes-3a07043d.pth",
+        "expected_size_mb": 119,  # 约 119 MB
+        "min_size_bytes": 100_000_000,  # 最小 100 MB
+    },
+    "unet_r231-d5d2fc3d.pth": {
+        "url": "https://github.com/JoHof/lungmask/releases/download/v0.0/unet_r231-d5d2fc3d.pth",
+        "expected_size_mb": 30,  # 约 30 MB
+        "min_size_bytes": 25_000_000,  # 最小 25 MB
+    },
+}
+
+
+def get_torch_cache_dir() -> Path:
+    """获取 PyTorch hub 缓存目录"""
+    import torch
+    # PyTorch 默认缓存目录
+    cache_dir = Path(torch.hub.get_dir()) / "checkpoints"
+    return cache_dir
+
+
+def verify_lungmask_models(auto_fix: bool = True) -> Tuple[bool, str]:
+    """
+    验证 LungMask 模型文件的完整性
+
+    检查缓存目录中的模型文件是否存在且大小正确。
+    如果发现损坏的文件（大小不足），可以自动删除以便重新下载。
+
+    Args:
+        auto_fix: 是否自动删除损坏的文件
+
+    Returns:
+        (is_valid, message): 验证结果和详细信息
+    """
+    try:
+        cache_dir = get_torch_cache_dir()
+    except Exception as e:
+        return False, f"无法获取缓存目录: {e}"
+
+    issues = []
+    fixed = []
+
+    for model_name, info in LUNGMASK_MODELS.items():
+        model_path = cache_dir / model_name
+
+        if model_path.exists():
+            file_size = model_path.stat().st_size
+            min_size = info["min_size_bytes"]
+            expected_mb = info["expected_size_mb"]
+
+            if file_size < min_size:
+                # 文件太小，可能是下载中断
+                actual_mb = file_size / 1_000_000
+                issues.append(
+                    f"  ❌ {model_name}: 文件损坏（{actual_mb:.1f} MB < 预期 {expected_mb} MB）"
+                )
+
+                if auto_fix:
+                    try:
+                        model_path.unlink()
+                        fixed.append(f"  🔧 已删除损坏文件: {model_name}")
+                    except Exception as e:
+                        issues.append(f"  ⚠️ 无法删除损坏文件 {model_name}: {e}")
+            else:
+                logger.debug(f"  ✓ {model_name}: {file_size / 1_000_000:.1f} MB (正常)")
+        else:
+            # 文件不存在，首次运行时会自动下载
+            logger.debug(f"  ⏳ {model_name}: 未缓存（首次运行时将下载）")
+
+    if issues:
+        msg = "LungMask 模型文件校验失败:\n" + "\n".join(issues)
+        if fixed:
+            msg += "\n\n已自动修复:\n" + "\n".join(fixed)
+            msg += "\n\n请重新运行，将自动下载完整的模型文件。"
+        return False, msg
+
+    return True, "LungMask 模型文件校验通过"
+
+
+def ensure_lungmask_models_ready() -> bool:
+    """
+    确保 LungMask 模型已准备就绪
+
+    调用此函数会：
+    1. 检查模型文件是否存在且完整
+    2. 如果发现损坏文件，自动删除
+    3. 返回是否可以安全调用 LungMask
+
+    Returns:
+        is_ready: 模型是否已准备就绪
+    """
+    is_valid, msg = verify_lungmask_models(auto_fix=True)
+
+    if not is_valid:
+        logger.warning(msg)
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("如果下载速度慢，可以手动下载模型文件：")
+        logger.info("=" * 60)
+
+        cache_dir = get_torch_cache_dir()
+        for model_name, info in LUNGMASK_MODELS.items():
+            logger.info(f"  wget -c {info['url']}")
+            logger.info(f"       -O {cache_dir / model_name}")
+            logger.info("")
+
+        return False
+
+    return True
+
+
 def check_raidionicsrads_available() -> Tuple[bool, str]:
     """
     检查 Raidionicsrads 是否可用（用于气管树分割）
+
+    正确的 API: from raidionicsrads.compute import run_rads
 
     Returns:
         (is_available, message): 可用性和描述信息
     """
     try:
-        from raidionicsrads.compute import run_model
-        return True, "Raidionicsrads 可用"
+        # 检查正确的 API
+        from raidionicsrads.compute import run_rads
+        return True, "Raidionicsrads 可用 (run_rads API)"
     except ImportError:
-        return False, "Raidionicsrads 未安装，请运行: pip install raidionicsrads"
+        try:
+            # 检查包是否至少已安装
+            import raidionicsrads
+            return False, "Raidionicsrads 已安装但 API 不完整"
+        except ImportError:
+            return False, "Raidionicsrads 未安装，请运行: pip install raidionicsrads"
     except Exception as e:
         return False, f"Raidionicsrads 检查失败: {e}"
 
@@ -396,9 +517,22 @@ def segment_lung_lobes_lungmask(
         labeled_mask: 带标签的肺叶 mask (uint8, 值为 0-5)
         volume_stats: 每个肺叶的体积统计 (单位: mm³)
         affine: NIfTI affine 矩阵
+
+    Raises:
+        RuntimeError: 如果模型文件损坏或下载失败
     """
     import nibabel as nib
     import SimpleITK as sitk
+
+    # 在导入 LungMask 之前验证模型文件完整性
+    # 这可以提前发现下载中断导致的损坏文件
+    if not ensure_lungmask_models_ready():
+        raise RuntimeError(
+            "LungMask 模型文件不完整或已损坏。\n"
+            "已自动删除损坏文件，请重新运行以下载完整模型。\n"
+            "如果下载速度慢，请参考日志中的手动下载说明。"
+        )
+
     from lungmask import LMInferer
 
     input_path = Path(input_path)
@@ -430,10 +564,14 @@ def segment_lung_lobes_lungmask(
     # 执行分割
     segmentation = inferer.apply(input_image)
     # segmentation 是 numpy array，形状为 (Z, Y, X)，值为 0-5
+    # 需要转置为 nibabel 的 (X, Y, Z) 顺序以与原始 CT 数据对齐
+    segmentation = np.transpose(segmentation, (2, 1, 0))
+    logger.debug(f"  分割结果形状（转置后）: {segmentation.shape}")
 
     # 获取 affine 矩阵
     nii = nib.load(str(input_path))
     affine = nii.affine
+    logger.debug(f"  原始 CT 形状: {nii.shape}")
 
     # 计算体素体积
     voxel_dims = np.abs(np.diag(affine)[:3])
@@ -512,22 +650,75 @@ def segment_airway_raidionics(
         temp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 导入 raidionicsrads
-        from raidionicsrads.compute import run_model
+        # =========================================================
+        # Raidionicsrads API: from raidionicsrads.compute import run_rads
+        # 命令行模式需要 .ini 配置文件
+        # =========================================================
 
-        # 运行气管树分割
-        # task="airways" 指定气管树分割任务
-        run_model(
-            input_filename=str(input_path),
-            output_folder=str(temp_dir),
-            task="airways"
-        )
+        # 方式 1: 直接使用 Python API (推荐)
+        try:
+            from raidionicsrads.compute import run_rads
+
+            # 创建 .ini 配置文件
+            config_path = temp_dir / "rads_config.ini"
+            config_content = f"""[Default]
+task = airways_segmentation
+input_filename = {input_path}
+output_folder = {temp_dir}
+gpu_id = 0
+
+[Neuro]
+
+[Mediastinum]
+"""
+            with open(config_path, 'w') as f:
+                f.write(config_content)
+
+            logger.info(f"[Raidionicsrads] 使用 Python API (run_rads)")
+            logger.info(f"[Raidionicsrads] 配置文件: {config_path}")
+
+            # 调用 run_rads
+            run_rads(config_filename=str(config_path))
+
+        except ImportError as e:
+            logger.warning(f"[Raidionicsrads] Python API 导入失败: {e}")
+
+            # 方式 2: 尝试命令行调用
+            config_path = temp_dir / "rads_config.ini"
+            config_content = f"""[Default]
+task = airways_segmentation
+input_filename = {input_path}
+output_folder = {temp_dir}
+gpu_id = 0
+
+[Neuro]
+
+[Mediastinum]
+"""
+            with open(config_path, 'w') as f:
+                f.write(config_content)
+
+            cmd = ["python", "-m", "raidionicsrads", str(config_path), "--verbose", "info"]
+            logger.info(f"[Raidionicsrads] 执行命令: {' '.join(cmd)}")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+            if result.returncode != 0:
+                logger.warning(f"[Raidionicsrads] 命令行调用失败: {result.stderr[:500]}")
+                logger.warning("[Raidionicsrads] 气管树分割已跳过")
+                return None, None
 
         # 查找输出文件
-        # Raidionicsrads 输出文件名可能是 *_airways.nii.gz 或 airways_mask.nii.gz
+        # Raidionicsrads 输出文件名格式可能是：
+        # - {stem}_airways.nii.gz
+        # - Segmentation-airways.nii.gz
+        # - airways_mask.nii.gz
         possible_outputs = [
             temp_dir / "airways_mask.nii.gz",
             temp_dir / f"{input_path.stem}_airways.nii.gz",
+            temp_dir / f"{input_path.stem.replace('.nii', '')}_Segmentation-airways.nii.gz",
+            temp_dir / "Segmentation-airways.nii.gz",
+            temp_dir / "airways.nii.gz",
         ]
 
         airway_file = None
@@ -536,15 +727,28 @@ def segment_airway_raidionics(
                 airway_file = p
                 break
 
-        # 如果没找到，搜索目录
+        # 如果没找到，递归搜索目录
         if airway_file is None:
-            for f in temp_dir.glob("*airway*.nii.gz"):
-                airway_file = f
-                break
+            for pattern in ["**/*airways*.nii.gz", "**/*Airway*.nii.gz", "**/Segmentation*.nii.gz"]:
+                matches = list(temp_dir.glob(pattern))
+                if matches:
+                    airway_file = matches[0]
+                    break
+
+        # 最后尝试找任意 nii.gz 文件
+        if airway_file is None:
+            nii_files = list(temp_dir.rglob("*.nii.gz"))
+            if nii_files:
+                airway_file = nii_files[0]
 
         if airway_file is None:
-            logger.error(f"[Raidionicsrads] 未找到气管树分割结果")
+            # 列出目录中的所有文件帮助调试
+            all_files = list(temp_dir.rglob("*"))
+            logger.warning(f"[Raidionicsrads] 未找到气管树分割结果")
+            logger.warning(f"[Raidionicsrads] 输出目录内容: {[str(f.relative_to(temp_dir)) for f in all_files[:10]]}")
             return None, None
+
+        logger.info(f"[Raidionicsrads] 找到输出文件: {airway_file.name}")
 
         # 加载结果
         nii = nib.load(str(airway_file))
@@ -572,12 +776,13 @@ def segment_airway_raidionics(
 
         return trachea_mask, affine
 
-    except ImportError as e:
-        logger.error(f"[Raidionicsrads] 导入失败: {e}")
-        logger.error("请安装: pip install raidionicsrads")
+    except subprocess.TimeoutExpired:
+        logger.warning("[Raidionicsrads] 执行超时（>10分钟）")
+        logger.warning("[Raidionicsrads] 气管树分割已跳过")
         return None, None
     except Exception as e:
-        logger.error(f"[Raidionicsrads] 分割失败: {e}")
+        logger.warning(f"[Raidionicsrads] 分割失败: {e}")
+        logger.warning("[Raidionicsrads] 气管树分割已跳过，将只使用肺叶分割结果")
         return None, None
     finally:
         # 清理临时文件
@@ -814,6 +1019,36 @@ def run_lungmask_batch(
     logger.info(f"  融合模型: {'LTRCLobes_R231' if use_fusion else 'LTRCLobes'}")
     logger.info(f"  设备: {'CPU' if force_cpu else 'GPU (如可用)'}")
     logger.info("=" * 60)
+
+    # ===== 预检查：验证模型文件完整性 =====
+    # 在开始批量处理前检查，避免所有样本都失败
+    if create_labeled_lobes:
+        logger.info("")
+        logger.info("正在验证 LungMask 模型文件...")
+        is_valid, msg = verify_lungmask_models(auto_fix=True)
+        if not is_valid:
+            logger.error(msg)
+            logger.error("")
+            logger.error("=" * 60)
+            logger.error("模型文件校验失败！请执行以下步骤修复：")
+            logger.error("=" * 60)
+            logger.error("")
+            logger.error("方案 1：清除缓存后重新运行")
+            try:
+                cache_dir = get_torch_cache_dir()
+                logger.error(f"  rm -rf {cache_dir}/unet_*.pth")
+            except Exception:
+                logger.error("  rm -rf ~/.cache/torch/hub/checkpoints/unet_*.pth")
+            logger.error("  python run_phase2_pipeline.py --step1-only --force")
+            logger.error("")
+            logger.error("方案 2：手动下载模型文件（如果网络慢）")
+            for model_name, info in LUNGMASK_MODELS.items():
+                logger.error(f"  wget -c {info['url']}")
+            logger.error("")
+            return {"success": [], "failed": [f.name for f in nifti_files], "skipped": []}
+        else:
+            logger.info("  ✅ 模型文件校验通过")
+        logger.info("")
 
     results = {"success": [], "failed": [], "skipped": []}
 
