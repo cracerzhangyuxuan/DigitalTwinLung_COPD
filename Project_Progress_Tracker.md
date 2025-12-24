@@ -1,7 +1,11 @@
 # COPD 数字孪生肺项目 - 进度追踪文档
 
-**更新日期：** 2025年12月22日
+**更新日期：** 2025年12月24日
 **项目名称：** 基于全代码自动化的COPD数字孪生肺构建与3D可视化研究
+
+> **2025-12-24 重要更新**：分割模型已从 TotalSegmentator 替换为 LungMask + Raidionicsrads
+> - 肺叶分割：LungMask LTRCLobes_R231（边界清晰，无碎片化）
+> - 气管树分割：Raidionicsrads AGU-Net（3-4级支气管完整）
 
 ---
 
@@ -50,9 +54,10 @@
 |       收集正常肺    build_template_ants.py    存入 data/02_atlas/            |
 |                     (运行约一整夜)                                           |
 |                                                                              |
-| 新增功能 (2025-12-22):                                                       |
-|   [x] 气管树分割 (extract_trachea_mask)                                      |
-|   [x] 肺叶精细标记 (create_labeled_lung_lobes, 5个独立标签)                  |
+| 新增功能 (2025-12-24 更新):                                                  |
+|   [x] 肺叶分割 (segment_lung_lobes_lungmask, LungMask)                       |
+|   [x] 气管树分割 (segment_airway_raidionics, Raidionicsrads AGU-Net)         |
+|   [x] 批量分割入口 (run_lungmask_batch)                                      |
 |   [x] 气管树模板生成 (generate_template_trachea_mask)                        |
 |                                                                              |
 | 输出: standard_template.nii.gz, standard_mask.nii.gz,                        |

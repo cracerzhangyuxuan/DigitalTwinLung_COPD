@@ -44,41 +44,54 @@ data_format:
 
 # ----- 预处理参数 -----
 preprocessing:
-  # 肺部分割配置 (2025-12-09 更新)
+  # 肺部分割配置 (2025-12-24 更新)
+  # 重要：已将 TotalSegmentator 替换为 LungMask + Raidionicsrads
+  # 原因：TotalSegmentator 气管树仅分割主气管，肺叶边界碎片化
   segmentation:
-    # 分割方法: auto, totalsegmentator, threshold
-    # - auto: 自动选择（优先 TotalSegmentator GPU，回退到 threshold）
-    # - totalsegmentator: 深度学习方法（高精度，需 GPU 和 TotalSegmentator 安装）
+    # 分割方法: auto, lungmask, threshold
+    # - auto: 自动选择（优先 LungMask GPU，回退到 threshold）
+    # - lungmask: LungMask + Raidionicsrads（推荐，高精度）
     # - threshold: 阈值方法（轻量 CPU，用于无 GPU 环境）
     method: "auto"
 
-    # 设备配置: gpu, cpu, cuda:0, cuda:1 等
+    # 设备配置: gpu, cpu
     device: "gpu"
 
-    # TotalSegmentator 特定参数
+    # LungMask 参数 (2025-12-24 新增)
+    lungmask:
+      # 肺叶分割模型
+      model: "LTRCLobes"         # 模型名称
+      fillmodel: "R231"          # 填充模型（用于边界优化）
+      use_fusion: true           # 是否使用融合模型（推荐）
+      batch_size: 20             # 批处理大小（GPU 显存不足时减小）
+
+    # Raidionicsrads 参数 (2025-12-24 新增)
+    raidionicsrads:
+      task: "airways"            # 分割任务类型
+      # 注意：首次运行会自动下载预训练权重
+
+    # 气管树分割
+    extract_trachea: true        # 是否提取气管树 mask (使用 Raidionicsrads)
+
+    # 肺叶精细标记
+    create_labeled_lobes: true   # 是否创建带标签的肺叶 mask (使用 LungMask)
+    lobe_labels:                 # 肺叶标签定义（LungMask 直接输出，无需转换）
+      left_upper: 1              # 左上叶
+      left_lower: 2              # 左下叶
+      right_upper: 3             # 右上叶
+      right_middle: 4            # 右中叶
+      right_lower: 5             # 右下叶
+
+    # [已弃用] TotalSegmentator 参数（保留用于兼容性）
     totalsegmentator:
-      task: "lung"               # 分割任务类型
-      fast_mode: false           # 快速模式（精度略低，速度快 5 倍）
-      roi_subset:                # 分割的肺叶子集
+      task: "lung"
+      fast_mode: false
+      roi_subset:
         - "lung_upper_lobe_left"
         - "lung_lower_lobe_left"
         - "lung_upper_lobe_right"
         - "lung_middle_lobe_right"
         - "lung_lower_lobe_right"
-
-      # 气管树分割 (2025-12-22 新增)
-      extract_trachea: true      # 是否提取气管树 mask
-      trachea_structures:        # 气管相关结构
-        - "trachea"
-
-      # 肺叶精细标记 (2025-12-22 新增)
-      create_labeled_lobes: true # 是否创建带标签的肺叶 mask
-      lobe_labels:               # 肺叶标签定义
-        lung_upper_lobe_left: 1    # 左上叶
-        lung_lower_lobe_left: 2    # 左下叶
-        lung_upper_lobe_right: 3   # 右上叶
-        lung_middle_lobe_right: 4  # 右中叶
-        lung_lower_lobe_right: 5   # 右下叶
 
     # 阈值方法参数
     threshold:
@@ -116,7 +129,29 @@ registration:
     type_of_transform: "SyN"
     iteration_limit: 5
     gradient_step: 0.2
-  
+    # 配准样本数量（2025-12-24 更新）
+    # - 5: 快速测试模式，约 30 分钟
+    # - 20: 标准模式，约 2-4 小时
+    # - 37: 完整模式（全部样本），约 8-12 小时
+    max_subjects: 5  # 默认 5 例用于快速测试，生产环境建议 20-37
+
+  # 肺叶标签融合算法（2025-12-24 新增）
+  label_fusion:
+    # 融合方法: "voting" (简单投票) 或 "jlf" (Joint Label Fusion)
+    # - voting: 快速但边界可能碎片化
+    # - jlf: 边界平滑，对配准误差鲁棒，但计算量大
+    method: "jlf"
+
+    # 投票阈值（仅 voting 方法使用）
+    voting_threshold: 0.3
+
+    # JLF 参数（仅 jlf 方法使用）
+    jlf:
+      beta: 4          # 权重锐度，越高相似样本权重越大
+      rad: 2           # 邻域半径
+      rho: 0.01        # 岭惩罚，增加鲁棒性
+      r_search: 3      # 搜索半径
+
   # 病灶配准
   lesion_registration:
     type_of_transform: "SyNRA"

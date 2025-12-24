@@ -221,10 +221,14 @@ def run_segmentation(config: dict, logger: logging.Logger,
     logger.info("=" * 60)
     logger.info("步骤 3: 肺部分割（含气管树和5肺叶标签）")
     logger.info("=" * 60)
+    logger.info("  使用模型: LungMask (肺叶) + Raidionicsrads (气管树)")
+    logger.info("  注意: 已替换 TotalSegmentator，分割质量更高")
 
     # 导入分割模块
+    # 2025-12-24 更新：使用 run_lungmask_batch 替代 run_totalsegmentator_batch
+    # 原因：TotalSegmentator 气管树分割质量差，肺叶边界碎片化
     run_seg_module = importlib.import_module("src.01_preprocessing.run_segmentation")
-    run_totalsegmentator_batch = run_seg_module.run_totalsegmentator_batch
+    run_lungmask_batch = run_seg_module.run_lungmask_batch
 
     raw_dir = Path(config['paths']['raw_data'])
     cleaned_dir = Path(config['paths']['cleaned_data'])
@@ -248,31 +252,34 @@ def run_segmentation(config: dict, logger: logging.Logger,
     elif limit:
         process_limit = limit
 
+    # 确定是否强制使用 CPU
+    force_cpu = (device == "cpu")
+
     logger.info(f"  输入目录: {normal_input}")
     logger.info(f"  Mask 输出: {mask_output}")
     logger.info(f"  Clean 输出: {clean_output}")
     logger.info(f"  可用文件: {total_count}")
     logger.info(f"  处理限制: {process_limit if process_limit else '全部'}")
-    logger.info(f"  设备: {device}")
+    logger.info(f"  设备: {'CPU' if force_cpu else 'GPU (如可用)'}")
     logger.info(f"  覆盖模式: {'是' if force else '否'}")
 
     if force:
         logger.warning("  ⚠️ 覆盖模式已启用，将重新处理所有文件")
 
-    # 批量分割
+    # 批量分割（使用 LungMask + Raidionicsrads）
     start_time = time.time()
 
     try:
-        results = run_totalsegmentator_batch(
+        results = run_lungmask_batch(
             input_dir=normal_input,
             mask_output_dir=mask_output,
             clean_output_dir=clean_output,
-            device=device,
-            fast=False,
+            force_cpu=force_cpu,
             skip_existing=not force,  # force=True 时不跳过
             limit=process_limit,
-            extract_trachea=True,      # 启用气管树分割
-            create_labeled_lobes=True  # 启用5肺叶标签
+            extract_trachea=True,       # 启用气管树分割 (Raidionicsrads)
+            create_labeled_lobes=True,  # 启用5肺叶标签 (LungMask)
+            use_fusion=True             # 使用 LTRCLobes_R231 融合模型
         )
 
         elapsed = time.time() - start_time

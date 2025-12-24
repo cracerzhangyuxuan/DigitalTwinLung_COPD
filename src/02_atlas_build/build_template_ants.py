@@ -25,6 +25,7 @@
 作者: DigitalTwinLung_COPD Team
 更新: 2025-12-09
 更新: 2025-12-22 - 添加气管树模板 mask 生成功能
+更新: 2025-12-24 - 添加 Joint Label Fusion (JLF) 支持，更新分割模型说明
 """
 
 from pathlib import Path
@@ -273,8 +274,8 @@ def generate_template_mask_from_inputs(
     """
     使用输入 mask 配准后投票生成模板 mask
 
-    这种方法比简单阈值分割更精确，因为它利用了 TotalSegmentator
-    分割的高质量 mask。
+    这种方法比简单阈值分割更精确，因为它利用了 LungMask + Raidionicsrads
+    分割的高质量 mask。（注：已于 2025-12-24 从 TotalSegmentator 替换）
 
     Args:
         template_path: 模板 CT 路径
@@ -610,6 +611,159 @@ def generate_template_lung_lobes(
     logger.info(f"肺叶模板已保存（从 {valid_count} 个输入生成）: {output_lobes_path}")
     for label in range(1, 6):
         count = np.sum(final_lobes == label)
+        logger.info(f"  {lobe_names[label]}: {count:,} 体素")
+
+    return output_lobes_path
+
+
+def generate_template_lung_lobes_jlf(
+    template_path: Union[str, Path],
+    input_image_paths: List[Union[str, Path]],
+    input_lobes_paths: List[Union[str, Path]],
+    output_lobes_path: Union[str, Path],
+    beta: float = 4,
+    rad: int = 2,
+    rho: float = 0.01,
+    r_search: int = 3
+) -> Optional[Path]:
+    """
+    使用 Joint Label Fusion (JLF) 算法生成模板肺叶标签 mask
+
+    JLF 相比简单投票算法的优势:
+    - 边界更平滑，减少碎片化
+    - 对配准误差更鲁棒（通过加权融合）
+    - 考虑局部强度相似性，不仅仅是投票数
+
+    JLF 工作原理:
+    1. 将所有 atlas 图像和标签配准到目标模板空间
+    2. 对于每个目标体素，根据局部强度相似性计算每个 atlas 的权重
+    3. 使用加权投票确定最终标签
+    4. beta 参数控制权重锐度（越高相似 atlas 权重越大）
+
+    Args:
+        template_path: 模板 CT 路径
+        input_image_paths: 输入图像路径列表
+        input_lobes_paths: 输入肺叶标签 mask 路径列表
+        output_lobes_path: 输出肺叶标签模板路径
+        beta: 权重锐度参数，默认 4（越高相似样本权重越大）
+        rad: 邻域半径，默认 2
+        rho: 岭惩罚，增加对异常值的鲁棒性，默认 0.01
+        r_search: 搜索半径，默认 3
+
+    Returns:
+        output_lobes_path: 生成的肺叶模板路径，失败返回 None
+
+    Note:
+        JLF 计算量较大，建议在 GPU 服务器上运行。
+        可通过设置 ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS 控制线程数。
+    """
+    if not check_ants_available():
+        raise ImportError("ANTsPy 不可用")
+
+    logger.info("=" * 60)
+    logger.info("使用 Joint Label Fusion (JLF) 生成模板肺叶标签...")
+    logger.info(f"  输入图像数: {len(input_image_paths)}")
+    logger.info(f"  JLF 参数: beta={beta}, rad={rad}, rho={rho}, r_search={r_search}")
+    logger.info("=" * 60)
+
+    if len(input_lobes_paths) == 0:
+        logger.warning("没有输入肺叶标签 mask，跳过生成")
+        return None
+
+    # 加载模板
+    template = ants.image_read(str(template_path))
+
+    # 生成模板 mask（JLF 需要 mask 参数）
+    template_mask = ants.get_mask(template, low_thresh=template.min() + 100)
+
+    # 配准所有图像到模板空间
+    warped_images = []
+    warped_labels = []
+
+    for i, (img_path, lobes_path) in enumerate(zip(input_image_paths, input_lobes_paths)):
+        img_path = Path(img_path)
+        lobes_path = Path(lobes_path)
+
+        if not img_path.exists() or not lobes_path.exists():
+            logger.warning(f"  [{i+1}] 文件缺失，跳过")
+            continue
+
+        try:
+            img = ants.image_read(str(img_path))
+            lobes_mask = ants.image_read(str(lobes_path))
+
+            logger.info(f"  [{i+1}/{len(input_image_paths)}] 配准: {img_path.name}")
+            registration = ants.registration(
+                fixed=template,
+                moving=img,
+                type_of_transform='SyN'
+            )
+
+            # 应用变换到图像
+            warped_img = ants.apply_transforms(
+                fixed=template,
+                moving=img,
+                transformlist=registration['fwdtransforms']
+            )
+
+            # 应用变换到标签（使用最近邻插值）
+            warped_label = ants.apply_transforms(
+                fixed=template,
+                moving=lobes_mask,
+                transformlist=registration['fwdtransforms'],
+                interpolator='nearestNeighbor'
+            )
+
+            warped_images.append(warped_img)
+            warped_labels.append(warped_label)
+            logger.info(f"    ✓ 配准成功")
+
+        except Exception as e:
+            logger.warning(f"  [{i+1}] 配准失败: {e}")
+            continue
+
+    if len(warped_images) < 2:
+        logger.error("有效的配准结果不足（需要至少 2 个），回退到简单投票")
+        return generate_template_lung_lobes(
+            template_path, input_image_paths, input_lobes_paths, output_lobes_path
+        )
+
+    # 调用 ANTsPy 的 Joint Label Fusion
+    logger.info(f"执行 Joint Label Fusion（{len(warped_images)} 个 atlas）...")
+
+    try:
+        jlf_result = ants.joint_label_fusion(
+            target_image=template,
+            target_image_mask=template_mask,
+            atlas_list=warped_images,
+            label_list=warped_labels,
+            beta=beta,
+            rad=[rad] * template.dimension,
+            rho=rho,
+            r_search=r_search,
+            verbose=True
+        )
+
+        final_lobes = jlf_result['segmentation']
+
+    except Exception as e:
+        logger.error(f"JLF 执行失败: {e}")
+        logger.info("回退到简单投票算法...")
+        return generate_template_lung_lobes(
+            template_path, input_image_paths, input_lobes_paths, output_lobes_path
+        )
+
+    # 保存结果
+    output_lobes_path = Path(output_lobes_path)
+    output_lobes_path.parent.mkdir(parents=True, exist_ok=True)
+    ants.image_write(final_lobes, str(output_lobes_path))
+
+    # 统计每个肺叶的体素数
+    final_lobes_np = final_lobes.numpy()
+    lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
+    logger.info(f"JLF 肺叶模板已保存: {output_lobes_path}")
+    for label in range(1, 6):
+        count = np.sum(final_lobes_np == label)
         logger.info(f"  {lobe_names[label]}: {count:,} 体素")
 
     return output_lobes_path
