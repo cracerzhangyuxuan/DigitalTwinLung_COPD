@@ -619,6 +619,152 @@ def segment_lung_lobes_lungmask(
     return labeled_mask, volume_stats, affine
 
 
+def segment_lung_lobes_totalsegmentator(
+    input_path: Union[str, Path],
+    output_path: Optional[Union[str, Path]] = None,
+    device: str = "gpu"
+) -> Tuple[Optional[np.ndarray], Optional[Dict[int, float]], Optional[np.ndarray]]:
+    """
+    使用 TotalSegmentator 进行肺叶分割
+
+    命令：TotalSegmentator -i input.nii.gz -o output_dir/ --task total --device gpu
+
+    输出文件映射（标签值与 LungMask 一致）：
+        lung_upper_lobe_left.nii.gz  → 标签 1 (左上叶)
+        lung_lower_lobe_left.nii.gz  → 标签 2 (左下叶)
+        lung_upper_lobe_right.nii.gz → 标签 3 (右上叶)
+        lung_middle_lobe_right.nii.gz → 标签 4 (右中叶)
+        lung_lower_lobe_right.nii.gz → 标签 5 (右下叶)
+
+    Args:
+        input_path: 输入 CT 文件路径 (NIfTI 格式)
+        output_path: 可选，保存肺叶标签 mask 的路径
+        device: 设备选择 ("gpu" 或 "cpu")
+
+    Returns:
+        lobes_labeled: 肺叶标签 mask (uint8, 值 0-5)
+        volume_stats: 每个肺叶的体积统计 (mm³)
+        affine: NIfTI affine 矩阵
+    """
+    import nibabel as nib
+    import tempfile
+
+    input_path = Path(input_path)
+    start_time = time.time()
+
+    logger.info(f"[TotalSegmentator] 开始肺叶分割 (--task total): {input_path.name}")
+
+    # 创建临时目录存放分割结果
+    temp_dir = Path(tempfile.mkdtemp(prefix="totalseg_lobes_"))
+
+    # TotalSegmentator 输出文件到标签的映射
+    lobe_file_mapping = {
+        "lung_upper_lobe_left.nii.gz": 1,    # 左上叶
+        "lung_lower_lobe_left.nii.gz": 2,    # 左下叶
+        "lung_upper_lobe_right.nii.gz": 3,   # 右上叶
+        "lung_middle_lobe_right.nii.gz": 4,  # 右中叶
+        "lung_lower_lobe_right.nii.gz": 5,   # 右下叶
+    }
+
+    try:
+        # 构建 TotalSegmentator 命令
+        # 使用 -rs (roi_subset) 仅分割肺叶，加速处理
+        roi_list = [
+            "lung_upper_lobe_left", "lung_lower_lobe_left",
+            "lung_upper_lobe_right", "lung_middle_lobe_right", "lung_lower_lobe_right"
+        ]
+
+        cmd = [
+            "TotalSegmentator",
+            "-i", str(input_path),
+            "-o", str(temp_dir),
+            "-rs",
+        ] + roi_list
+
+        # 设备选择
+        if device.lower() == "cpu":
+            cmd.extend(["--device", "cpu"])
+        else:
+            cmd.extend(["--device", "gpu"])
+
+        logger.info(f"[TotalSegmentator] 执行命令: {' '.join(cmd[:6])}... (共 {len(roi_list)} 个 ROI)")
+
+        # 运行 TotalSegmentator
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=1800  # 30 分钟超时
+        )
+
+        if result.returncode != 0:
+            logger.error(f"[TotalSegmentator] 命令执行失败")
+            logger.error(f"[TotalSegmentator] stderr: {result.stderr[:500]}")
+            return None, None, None
+
+        # 合并所有肺叶为带标签的 mask
+        labeled_mask = None
+        affine = None
+        volume_stats = {}
+
+        for lobe_file, label_value in lobe_file_mapping.items():
+            lobe_path = temp_dir / lobe_file
+
+            if lobe_path.exists():
+                nii = nib.load(str(lobe_path))
+                lobe_mask = np.asanyarray(nii.dataobj) > 0
+
+                if labeled_mask is None:
+                    labeled_mask = np.zeros(lobe_mask.shape, dtype=np.uint8)
+                    affine = nii.affine
+
+                labeled_mask[lobe_mask] = label_value
+
+                # 计算体积
+                voxel_dims = np.abs(np.diag(nii.affine)[:3])
+                voxel_volume = float(np.prod(voxel_dims))  # mm³
+                lobe_volume = np.sum(lobe_mask) * voxel_volume
+                volume_stats[label_value] = lobe_volume
+
+                lobe_name = LOBE_NAMES.get(label_value, f"Lobe {label_value}")
+                logger.info(f"    肺叶 {label_value} ({lobe_name}): {lobe_volume/1000:.1f} mL")
+            else:
+                logger.warning(f"[TotalSegmentator] 未找到肺叶文件: {lobe_file}")
+
+        if labeled_mask is None:
+            logger.error("[TotalSegmentator] 没有找到任何肺叶分割结果")
+            return None, None, None
+
+        # 保存结果
+        if output_path is not None:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            save_nifti(labeled_mask, output_path, affine=affine, dtype='uint8')
+            logger.info(f"[TotalSegmentator] 肺叶标签 mask 已保存: {output_path}")
+
+        elapsed = time.time() - start_time
+        logger.info(f"[TotalSegmentator] 肺叶分割完成，耗时: {elapsed:.1f}s")
+
+        return labeled_mask, volume_stats, affine
+
+    except subprocess.TimeoutExpired:
+        logger.error("[TotalSegmentator] 执行超时（>30分钟）")
+        return None, None, None
+    except FileNotFoundError:
+        logger.error("[TotalSegmentator] 未找到 TotalSegmentator 命令")
+        logger.error("[TotalSegmentator] 请安装: pip install TotalSegmentator")
+        return None, None, None
+    except Exception as e:
+        logger.error(f"[TotalSegmentator] 肺叶分割失败: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return None, None, None
+    finally:
+        # 清理临时文件
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def segment_airway_totalsegmentator(
     input_path: Union[str, Path],
     output_path: Optional[Union[str, Path]] = None,
@@ -1030,17 +1176,18 @@ def run_lungmask_batch(
             all_exist = all_exist and lobes_path.exists()
 
         if skip_existing and all_exist:
-            logger.info(f"[{i}/{len(nifti_files)}] 跳过已处理: {stem}")
+            logger.info(f"[{i}/{len(nifti_files)}] {stem} - 跳过（已存在）")
             results["skipped"].append(stem)
             continue
 
-        logger.info(f"[{i}/{len(nifti_files)}] 处理: {stem}")
+        # 精简日志：显示当前进度和文件名
+        logger.info(f"[{i}/{len(nifti_files)}] {stem}")
         start_time = time.time()
 
         try:
             # ===== 步骤 1: 使用 LungMask 进行肺叶分割 =====
             if create_labeled_lobes:
-                labeled_mask, volume_stats, affine = segment_lung_lobes_lungmask(
+                labeled_mask, _, affine = segment_lung_lobes_lungmask(
                     input_path=nifti_path,
                     output_path=lobes_path,
                     use_fusion=use_fusion,
@@ -1049,6 +1196,7 @@ def run_lungmask_batch(
 
                 # 从肺叶标签生成二值 mask
                 binary_mask = (labeled_mask > 0).astype(np.uint8)
+                logger.info(f"  ├─ [1/3] 肺叶分割 (LungMask) ✅")
             else:
                 # 如果不需要肺叶标签，使用 LungMask R231 进行左右肺分割
                 import SimpleITK as sitk
@@ -1064,22 +1212,26 @@ def run_lungmask_batch(
 
                 nii = nib.load(str(nifti_path))
                 affine = nii.affine
+                logger.info(f"  ├─ [1/3] 二值分割 (LungMask R231) ✅")
 
             # 保存二值 mask
             save_nifti(binary_mask, mask_path, affine=affine, dtype='uint8')
-            logger.info(f"    二值 mask 已保存: {mask_path.name}")
 
             # ===== 步骤 2: 使用 TotalSegmentator lung_vessels 进行气管树分割 =====
             trachea_mask = None
             if extract_trachea:
-                # 使用 --task lung_vessels 获取完整支气管树（3-4 级分支）
-                # 比默认的 --task total（仅主气管）质量更高
                 device_str = "cpu" if force_cpu else "gpu"
                 trachea_mask, _ = segment_airway_totalsegmentator(
                     input_path=nifti_path,
                     output_path=trachea_path,
                     device=device_str
                 )
+                if trachea_mask is not None:
+                    logger.info(f"  ├─ [2/3] 气管树分割 (TotalSegmentator lung_vessels) ✅")
+                else:
+                    logger.warning(f"  ├─ [2/3] 气管树分割 ⚠️ 跳过")
+            else:
+                logger.info(f"  ├─ [2/3] 气管树分割 - 已禁用")
 
             # ===== 步骤 3: 创建清洗后的 CT =====
             ct_data, ct_affine = load_nifti(nifti_path, return_affine=True)
@@ -1089,20 +1241,18 @@ def run_lungmask_batch(
             keep_mask = binary_mask.copy()
             if trachea_mask is not None:
                 keep_mask = keep_mask | (trachea_mask > 0)
-                logger.debug(f"    保留区域已包含气管树")
 
             ct_clean[keep_mask == 0] = background_hu
             save_nifti(ct_clean, clean_path, affine=ct_affine)
-            logger.info(f"    清洗后 CT 已保存: {clean_path.name}")
 
             # 统计信息
             lung_ratio = np.sum(binary_mask) / binary_mask.size * 100
             elapsed = time.time() - start_time
-            logger.info(f"    ✅ 完成 - 肺占比: {lung_ratio:.1f}%, 耗时: {elapsed:.1f}s")
+            logger.info(f"  └─ [3/3] 清洗 CT ✅ - 肺占比: {lung_ratio:.1f}%, 耗时: {elapsed:.1f}s")
             results["success"].append(stem)
 
         except Exception as e:
-            logger.error(f"    ❌ 失败: {e}")
+            logger.error(f"  └─ ❌ 失败: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             results["failed"].append((stem, str(e)))
@@ -1110,6 +1260,157 @@ def run_lungmask_batch(
     # 输出汇总
     logger.info("=" * 60)
     logger.info("批量分割完成汇总:")
+    logger.info(f"  成功: {len(results['success'])}")
+    logger.info(f"  失败: {len(results['failed'])}")
+    logger.info(f"  跳过: {len(results['skipped'])}")
+    logger.info("=" * 60)
+
+    return results
+
+
+# =============================================================================
+# TotalSegmentator 肺叶分割批量处理函数（可选方案）
+# =============================================================================
+
+def run_totalsegmentator_lobes_batch(
+    input_dir: Union[str, Path],
+    mask_output_dir: Union[str, Path],
+    clean_output_dir: Union[str, Path],
+    device: str = "gpu",
+    skip_existing: bool = True,
+    limit: Optional[int] = None,
+    background_hu: float = -1000,
+    extract_trachea: bool = True
+) -> Dict[str, List]:
+    """
+    使用 TotalSegmentator 批量进行肺叶分割
+
+    分割方案：
+    - 肺叶分割：TotalSegmentator --task total（默认任务）
+    - 气管树分割：TotalSegmentator --task lung_vessels（如启用）
+
+    Args:
+        input_dir: 输入目录
+        mask_output_dir: mask 输出目录
+        clean_output_dir: 清洗后 CT 输出目录
+        device: 设备 ("gpu" 或 "cpu")
+        skip_existing: 是否跳过已处理的文件
+        limit: 限制处理数量
+        background_hu: 背景 HU 值
+        extract_trachea: 是否提取气管树 mask
+
+    Returns:
+        results: 处理结果字典 {"success": [], "failed": [], "skipped": []}
+
+    Output files:
+        - {stem}_mask.nii.gz: 二值肺部 mask
+        - {stem}_clean.nii.gz: 清洗后的 CT
+        - {stem}_trachea_mask.nii.gz: 气管树 mask（如启用）
+        - {stem}_lung_lobes_labeled.nii.gz: 带标签的肺叶 mask (1-5)
+    """
+    import nibabel as nib
+
+    input_dir = Path(input_dir)
+    mask_output_dir = Path(mask_output_dir)
+    clean_output_dir = Path(clean_output_dir)
+
+    mask_output_dir.mkdir(parents=True, exist_ok=True)
+    clean_output_dir.mkdir(parents=True, exist_ok=True)
+
+    nifti_files = sorted(list(input_dir.glob("*.nii.gz")))
+    if limit:
+        nifti_files = nifti_files[:limit]
+
+    total_files = len(nifti_files)
+
+    logger.info("=" * 60)
+    logger.info("批量分割配置 (TotalSegmentator 肺叶分割)")
+    logger.info("=" * 60)
+    logger.info(f"  输入目录: {input_dir}")
+    logger.info(f"  文件数量: {total_files}")
+    logger.info(f"  [肺叶分割] TotalSegmentator --task total")
+    logger.info(f"  [气管树分割] {'TotalSegmentator --task lung_vessels' if extract_trachea else '禁用'}")
+    logger.info(f"  设备: {device.upper()}")
+    logger.info("=" * 60)
+
+    results = {"success": [], "failed": [], "skipped": []}
+
+    for i, nifti_path in enumerate(nifti_files, 1):
+        stem = nifti_path.name.replace('.nii.gz', '').replace('.nii', '')
+        mask_path = mask_output_dir / f"{stem}_mask.nii.gz"
+        clean_path = clean_output_dir / f"{stem}_clean.nii.gz"
+        trachea_path = mask_output_dir / f"{stem}_trachea_mask.nii.gz"
+        lobes_path = mask_output_dir / f"{stem}_lung_lobes_labeled.nii.gz"
+
+        # 检查是否已存在
+        all_exist = mask_path.exists() and clean_path.exists() and lobes_path.exists()
+        if extract_trachea:
+            all_exist = all_exist and trachea_path.exists()
+
+        if skip_existing and all_exist:
+            logger.info(f"[{i}/{total_files}] {stem} - 跳过（已存在）")
+            results["skipped"].append(stem)
+            continue
+
+        logger.info(f"[{i}/{total_files}] {stem}")
+        start_time = time.time()
+
+        try:
+            # ===== 步骤 1: 使用 TotalSegmentator 进行肺叶分割 =====
+            labeled_mask, volume_stats, affine = segment_lung_lobes_totalsegmentator(
+                input_path=nifti_path,
+                output_path=lobes_path,
+                device=device
+            )
+
+            if labeled_mask is None:
+                raise RuntimeError("TotalSegmentator 肺叶分割失败")
+
+            # 创建二值 mask
+            binary_mask = (labeled_mask > 0).astype(np.uint8)
+            save_nifti(binary_mask, mask_path, affine=affine, dtype='uint8')
+            logger.info(f"  ├─ [1/3] 肺叶分割 ✅ - 二值 mask 已保存")
+
+            # ===== 步骤 2: 气管树分割（如启用）=====
+            trachea_mask = None
+            if extract_trachea:
+                trachea_mask, _ = segment_airway_totalsegmentator(
+                    input_path=nifti_path,
+                    output_path=trachea_path,
+                    device=device
+                )
+                if trachea_mask is not None:
+                    logger.info(f"  ├─ [2/3] 气管树分割 ✅")
+                else:
+                    logger.warning(f"  ├─ [2/3] 气管树分割 ⚠️ 跳过")
+            else:
+                logger.info(f"  ├─ [2/3] 气管树分割 - 已禁用")
+
+            # ===== 步骤 3: 创建清洗后的 CT =====
+            ct_data, ct_affine = load_nifti(nifti_path, return_affine=True)
+            ct_clean = ct_data.copy()
+
+            # 构建保留区域 mask：肺叶 + 气管树
+            keep_mask = binary_mask.copy()
+            if trachea_mask is not None:
+                keep_mask = keep_mask | (trachea_mask > 0)
+
+            ct_clean[keep_mask == 0] = background_hu
+            save_nifti(ct_clean, clean_path, affine=ct_affine)
+
+            elapsed = time.time() - start_time
+            logger.info(f"  └─ [3/3] 清洗 CT ✅ - 耗时: {elapsed:.1f}s")
+            results["success"].append(stem)
+
+        except Exception as e:
+            logger.error(f"  └─ ❌ 失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            results["failed"].append((stem, str(e)))
+
+    # 输出汇总
+    logger.info("=" * 60)
+    logger.info("批量分割完成汇总 (TotalSegmentator):")
     logger.info(f"  成功: {len(results['success'])}")
     logger.info(f"  失败: {len(results['failed'])}")
     logger.info(f"  跳过: {len(results['skipped'])}")

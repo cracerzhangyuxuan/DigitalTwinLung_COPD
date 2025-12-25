@@ -197,14 +197,22 @@ def run_data_validation(config: dict, logger: logging.Logger,
 
 def run_segmentation(config: dict, logger: logging.Logger,
                      device: str = "gpu", quick_test: bool = False,
-                     force: bool = False, limit: int = None) -> bool:
+                     force: bool = False, limit: int = None,
+                     lobe_model: str = "lungmask",
+                     extract_trachea: bool = True) -> bool:
     """
-    运行肺部分割（使用 TotalSegmentator）
+    运行肺部分割
+
+    支持两种肺叶分割模型：
+        - lungmask: LungMask LTRCLobes_R231（默认，边界清晰）
+        - totalsegmentator: TotalSegmentator --task total（可选）
+
+    气管树分割：TotalSegmentator --task lung_vessels（完整支气管树 3-4 级分支）
 
     输出文件：
         - *_mask.nii.gz: 肺部二值 mask
         - *_clean.nii.gz: 背景清理后的 CT
-        - *_trachea_mask.nii.gz: 气管树 mask
+        - *_trachea_mask.nii.gz: 气管树 mask（如启用）
         - *_lung_lobes_labeled.nii.gz: 5肺叶标签 mask (值 1-5)
 
     Args:
@@ -214,21 +222,29 @@ def run_segmentation(config: dict, logger: logging.Logger,
         quick_test: 是否快速测试模式（处理 3 例）
         force: 是否强制覆盖已有文件
         limit: 限制处理数量
+        lobe_model: 肺叶分割模型 ("lungmask" 或 "totalsegmentator")
+        extract_trachea: 是否提取气管树
 
     Returns:
         bool: 是否全部成功
     """
     logger.info("=" * 60)
-    logger.info("步骤 3: 肺部分割（含气管树和5肺叶标签）")
+    logger.info("步骤 3: 肺部分割")
     logger.info("=" * 60)
-    logger.info("  使用模型: LungMask (肺叶) + Raidionicsrads (气管树)")
-    logger.info("  注意: 已替换 TotalSegmentator，分割质量更高")
+
+    # 显示分割模型信息
+    if lobe_model == "lungmask":
+        logger.info("  [肺叶分割] 使用模型: LungMask (LTRCLobes_R231)")
+    else:
+        logger.info("  [肺叶分割] 使用模型: TotalSegmentator (--task total)")
+
+    if extract_trachea:
+        logger.info("  [气管树分割] 使用模型: TotalSegmentator (--task lung_vessels)")
+    else:
+        logger.info("  [气管树分割] 已禁用 (--no-trachea)")
 
     # 导入分割模块
-    # 2025-12-24 更新：使用 run_lungmask_batch 替代 run_totalsegmentator_batch
-    # 原因：TotalSegmentator 气管树分割质量差，肺叶边界碎片化
-    run_seg_module = importlib.import_module("src.01_preprocessing.run_segmentation")
-    run_lungmask_batch = run_seg_module.run_lungmask_batch
+    seg_module = importlib.import_module("src.01_preprocessing.run_segmentation")
 
     raw_dir = Path(config['paths']['raw_data'])
     cleaned_dir = Path(config['paths']['cleaned_data'])
@@ -266,21 +282,37 @@ def run_segmentation(config: dict, logger: logging.Logger,
     if force:
         logger.warning("  ⚠️ 覆盖模式已启用，将重新处理所有文件")
 
-    # 批量分割（使用 LungMask + Raidionicsrads）
+    # 批量分割
     start_time = time.time()
 
     try:
-        results = run_lungmask_batch(
-            input_dir=normal_input,
-            mask_output_dir=mask_output,
-            clean_output_dir=clean_output,
-            force_cpu=force_cpu,
-            skip_existing=not force,  # force=True 时不跳过
-            limit=process_limit,
-            extract_trachea=True,       # 启用气管树分割 (TotalSegmentator --task lung_vessels)
-            create_labeled_lobes=True,  # 启用5肺叶标签 (LungMask)
-            use_fusion=True             # 使用 LTRCLobes_R231 融合模型
-        )
+        # 根据选择的模型调用不同的批量函数
+        if lobe_model == "lungmask":
+            # 使用 LungMask 肺叶分割 + TotalSegmentator lung_vessels 气管树分割
+            run_batch_func = seg_module.run_lungmask_batch
+            results = run_batch_func(
+                input_dir=normal_input,
+                mask_output_dir=mask_output,
+                clean_output_dir=clean_output,
+                force_cpu=force_cpu,
+                skip_existing=not force,
+                limit=process_limit,
+                extract_trachea=extract_trachea,
+                create_labeled_lobes=True,
+                use_fusion=True
+            )
+        else:
+            # 使用 TotalSegmentator 肺叶分割
+            run_batch_func = seg_module.run_totalsegmentator_lobes_batch
+            results = run_batch_func(
+                input_dir=normal_input,
+                mask_output_dir=mask_output,
+                clean_output_dir=clean_output,
+                device=device,
+                skip_existing=not force,
+                limit=process_limit,
+                extract_trachea=extract_trachea
+            )
 
         elapsed = time.time() - start_time
 
@@ -606,6 +638,21 @@ def main():
         '--skip-atlas', action='store_true',
         help='跳过 Atlas 构建（仅运行分割，等同于 --step1-only）'
     )
+    step_group.add_argument(
+        '--viz-only', action='store_true',
+        help='仅执行可视化渲染（跳过分割和配准，需要已有模板文件）'
+    )
+
+    # 分割模型选择参数
+    parser.add_argument(
+        '--lobe-model', type=str, default='totalsegmentator',
+        choices=['totalsegmentator', 'lungmask'],
+        help='肺叶分割模型选择（默认: totalsegmentator）'
+    )
+    parser.add_argument(
+        '--no-trachea', action='store_true',
+        help='跳过气管树分割'
+    )
 
     # 其他参数
     parser.add_argument(
@@ -639,10 +686,114 @@ def main():
     # 设置日志
     logger = setup_logging()
 
+    # 加载配置
+    try:
+        with open(args.config, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"无法加载配置文件: {e}")
+        sys.exit(1)
+
+    # 记录开始时间
+    pipeline_start = time.time()
+
+    # =========================================================================
+    # --viz-only 模式：仅执行可视化
+    # =========================================================================
+    if args.viz_only:
+        logger.info("=" * 60)
+        logger.info("Phase 2: 仅可视化模式 (--viz-only)")
+        logger.info("=" * 60)
+        logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 检查模板文件
+        atlas_dir = Path(config['paths']['atlas'])
+        required_files = {
+            "template": atlas_dir / "standard_template.nii.gz",
+            "mask": atlas_dir / "standard_mask.nii.gz",
+        }
+        optional_files = {
+            "lobes": atlas_dir / "standard_lung_lobes_labeled.nii.gz",
+            "trachea": atlas_dir / "standard_trachea_mask.nii.gz",
+        }
+
+        logger.info("")
+        logger.info("检查模板文件:")
+        all_required_exist = True
+        for name, path in required_files.items():
+            exists = path.exists()
+            status = "✅" if exists else "❌"
+            logger.info(f"  {status} {name}: {path}")
+            if not exists:
+                all_required_exist = False
+
+        for name, path in optional_files.items():
+            exists = path.exists()
+            status = "✅" if exists else "⚠️ (可选)"
+            logger.info(f"  {status} {name}: {path}")
+
+        if not all_required_exist:
+            logger.error("")
+            logger.error("错误: 缺少必需的模板文件，无法执行可视化")
+            logger.error("请先运行完整流水线生成模板: python run_phase2_pipeline.py")
+            sys.exit(1)
+
+        # 执行可视化
+        viz_dir = atlas_dir / "visualizations"
+        logger.info("")
+        logger.info("生成底座三视图可视化...")
+
+        try:
+            viz_module = importlib.import_module("src.05_visualization.static_render")
+            render_atlas_complete_3views = viz_module.render_atlas_complete_3views
+
+            lobes_file = optional_files["lobes"]
+            trachea_file = optional_files["trachea"]
+            mask_file = required_files["mask"]
+
+            viz_success = render_atlas_complete_3views(
+                lung_mask_path=lobes_file if lobes_file.exists() else mask_file,
+                trachea_mask_path=trachea_file if trachea_file.exists() else None,
+                lobes_mask_path=lobes_file if lobes_file.exists() else None,
+                output_dir=viz_dir,
+                output_prefix="atlas_complete"
+            )
+
+            if viz_success:
+                logger.info("")
+                logger.info("✅ 可视化生成成功:")
+                for png in sorted(viz_dir.glob("atlas_complete_view_*.png")):
+                    logger.info(f"  - {png}")
+            else:
+                logger.error("❌ 可视化生成失败")
+                sys.exit(1)
+
+        except ImportError as e:
+            logger.error(f"无法导入可视化模块: {e}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"可视化生成失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            sys.exit(1)
+
+        # 总结
+        elapsed = time.time() - pipeline_start
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info(f"可视化完成，耗时: {elapsed:.1f} 秒")
+        logger.info("=" * 60)
+        sys.exit(0)
+
+    # =========================================================================
+    # 正常流水线模式
+    # =========================================================================
+
     # 确定执行模式
     run_segmentation_step = True
     run_atlas_step = True
     skip_template_build = False
+    extract_trachea = not args.no_trachea
 
     if args.step1_only or args.skip_atlas:
         run_atlas_step = False
@@ -657,6 +808,8 @@ def main():
     logger.info("=" * 60)
     logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"配置文件: {args.config}")
+    logger.info(f"肺叶分割模型: {args.lobe_model}")
+    logger.info(f"气管树分割: {'是 (TotalSegmentator lung_vessels)' if extract_trachea else '否 (--no-trachea)'}")
     logger.info(f"执行分割: {'是' if run_segmentation_step else '否'}")
     logger.info(f"执行Atlas: {'是' if run_atlas_step else '否'}")
     if skip_template_build:
@@ -668,17 +821,6 @@ def main():
         logger.info(f"处理限制: {args.limit}")
     if args.quick_test:
         logger.info(f"快速测试: 是")
-
-    # 加载配置
-    try:
-        with open(args.config, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-    except Exception as e:
-        logger.error(f"无法加载配置文件: {e}")
-        sys.exit(1)
-
-    # 记录开始时间
-    pipeline_start = time.time()
 
     # Step 1: 环境检查
     env_ok = run_environment_check(logger)
@@ -700,7 +842,9 @@ def main():
             device=args.device,
             quick_test=args.quick_test,
             force=args.force,
-            limit=args.limit
+            limit=args.limit,
+            lobe_model=args.lobe_model,
+            extract_trachea=extract_trachea
         )
         if not seg_ok:
             logger.warning("分割过程有错误，继续执行")
