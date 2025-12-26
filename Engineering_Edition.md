@@ -276,12 +276,12 @@ laa_percentage, stats = extract_emphysema_mask(
 
 > **注意**：LungMask 的标签值与项目定义完全一致，无需转换！
 
-**分割示例代码 (2025-12-25 更新)**
+**分割示例代码 (2025-12-24 更新)**
 
 ```python
 from src.01_preprocessing.run_segmentation import (
     segment_lung_lobes_lungmask,
-    segment_airway_totalsegmentator,
+    segment_airway_raidionics,
     run_lungmask_batch
 )
 
@@ -293,11 +293,10 @@ labeled_lobes, volume_stats, affine = segment_lung_lobes_lungmask(
 )
 # volume_stats: {1: 1234.5, 2: 987.6, ...}  # 单位: mm³
 
-# 方式 2: 单例气管树分割 (TotalSegmentator lung_vessels)
-trachea_mask, affine = segment_airway_totalsegmentator(
+# 方式 2: 单例气管树分割 (Raidionicsrads)
+trachea_mask, affine = segment_airway_raidionics(
     input_path="input.nii.gz",
-    output_path="output/trachea_mask.nii.gz",
-    device="gpu"  # 或 "cpu"
+    output_path="output/trachea_mask.nii.gz"
 )
 
 # 方式 3: 批量分割 (推荐)
@@ -305,8 +304,8 @@ results = run_lungmask_batch(
     input_dir="data/00_raw/normal",
     mask_output_dir="data/01_cleaned/normal_mask",
     clean_output_dir="data/01_cleaned/normal_clean",
-    extract_trachea=True,       # 启用气管树分割 (TotalSegmentator lung_vessels)
-    create_labeled_lobes=True,  # 启用肺叶标签 (LungMask)
+    extract_trachea=True,       # 启用气管树分割
+    create_labeled_lobes=True,  # 启用肺叶标签
     use_fusion=True             # 使用融合模型
 )
 ```

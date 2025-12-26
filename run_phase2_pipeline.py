@@ -390,7 +390,9 @@ def run_quality_check(config: dict, logger: logging.Logger) -> Tuple[bool, int]:
 
 def run_atlas_construction(config: dict, logger: logging.Logger,
                            quick_test: bool = False,
-                           skip_template_build: bool = False) -> bool:
+                           skip_template_build: bool = False,
+                           use_voting: bool = False,
+                           use_staple: bool = False) -> bool:
     """
     构建标准肺模板（含气管树模板）
 
@@ -405,6 +407,8 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
         logger: 日志记录器
         quick_test: 是否快速测试模式
         skip_template_build: 是否跳过模板构建（仅生成气管树模板）
+        use_voting: 是否使用简单投票算法（默认 False，即使用 JLF）
+        use_staple: 是否使用 STAPLE 算法（优先级高于 JLF）
 
     Returns:
         bool: 是否成功
@@ -476,7 +480,9 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
             num_images=max_subjects,
             skip_evaluation=False,
             quick_test=quick_test,
-            skip_template_build=skip_template_build  # 传递跳过参数
+            skip_template_build=skip_template_build,
+            use_voting=use_voting,
+            use_staple=use_staple
         )
 
         elapsed = time.time() - start_time
@@ -654,6 +660,18 @@ def main():
         help='跳过气管树分割'
     )
 
+    # 肺叶融合算法选择（互斥参数组）- 默认使用 JLF
+    fusion_group = parser.add_mutually_exclusive_group()
+    fusion_group.add_argument(
+        '--use-voting', action='store_true',
+        help='使用简单投票算法进行肺叶融合（速度快但精度较低）'
+    )
+    fusion_group.add_argument(
+        '--use-staple', action='store_true',
+        help='使用 STAPLE 算法进行肺叶融合（自动评估样本可靠性，对异常样本鲁棒）'
+    )
+    # 注意：默认使用 JLF 算法，无需额外参数
+
     # 其他参数
     parser.add_argument(
         '--quick-test', action='store_true',
@@ -738,6 +756,31 @@ def main():
             logger.error("请先运行完整流水线生成模板: python run_phase2_pipeline.py")
             sys.exit(1)
 
+        # 生成数字肺底座融合文件（如果肺叶标签存在）
+        lobes_file = optional_files["lobes"]
+        trachea_file = optional_files["trachea"]
+        scaffold_file = atlas_dir / "digital_lung_scaffold.nii.gz"
+
+        if lobes_file.exists() and not scaffold_file.exists():
+            logger.info("")
+            logger.info("生成数字肺底座融合文件...")
+            try:
+                atlas_module = importlib.import_module("src.02_atlas_build.build_template_ants")
+                create_scaffold = atlas_module.create_digital_lung_scaffold
+
+                scaffold, _ = create_scaffold(
+                    lobes_path=lobes_file,
+                    trachea_path=trachea_file if trachea_file.exists() else None,
+                    output_path=scaffold_file
+                )
+
+                if scaffold is not None:
+                    logger.info("✓ 数字肺底座已生成")
+                else:
+                    logger.warning("⚠ 数字肺底座生成失败")
+            except Exception as e:
+                logger.warning(f"⚠ 数字肺底座生成失败: {e}")
+
         # 执行可视化
         viz_dir = atlas_dir / "visualizations"
         logger.info("")
@@ -747,8 +790,6 @@ def main():
             viz_module = importlib.import_module("src.05_visualization.static_render")
             render_atlas_complete_3views = viz_module.render_atlas_complete_3views
 
-            lobes_file = optional_files["lobes"]
-            trachea_file = optional_files["trachea"]
             mask_file = required_files["mask"]
 
             viz_success = render_atlas_complete_3views(
@@ -810,6 +851,15 @@ def main():
     logger.info(f"配置文件: {args.config}")
     logger.info(f"肺叶分割模型: {args.lobe_model}")
     logger.info(f"气管树分割: {'是 (TotalSegmentator lung_vessels)' if extract_trachea else '否 (--no-trachea)'}")
+
+    # 确定肺叶融合算法（优先级：STAPLE > 投票 > JLF默认）
+    if args.use_staple:
+        fusion_algo = "STAPLE (概率估计)"
+    elif args.use_voting:
+        fusion_algo = "简单投票 (--use-voting)"
+    else:
+        fusion_algo = "JLF (默认高精度)"
+    logger.info(f"肺叶融合算法: {fusion_algo}")
     logger.info(f"执行分割: {'是' if run_segmentation_step else '否'}")
     logger.info(f"执行Atlas: {'是' if run_atlas_step else '否'}")
     if skip_template_build:
@@ -865,7 +915,9 @@ def main():
         atlas_ok = run_atlas_construction(
             config, logger,
             quick_test=args.quick_test,
-            skip_template_build=skip_template_build
+            skip_template_build=skip_template_build,
+            use_voting=args.use_voting,
+            use_staple=args.use_staple
         )
         if not atlas_ok:
             logger.error("Atlas 构建失败")
@@ -907,6 +959,33 @@ def main():
     if lobes_file.exists():
         logger.info("✓ 肺叶标签模板已生成")
         logger.info(f"  - {lobes_file}")
+
+    # 生成数字肺底座融合文件（5 肺叶 + 气管树）
+    scaffold_file = atlas_dir / "digital_lung_scaffold.nii.gz"
+    if lobes_file.exists():
+        logger.info("")
+        logger.info("生成数字肺底座融合文件...")
+        try:
+            atlas_module = importlib.import_module("src.02_atlas_build.build_template_ants")
+            create_scaffold = atlas_module.create_digital_lung_scaffold
+
+            scaffold, stats = create_scaffold(
+                lobes_path=lobes_file,
+                trachea_path=trachea_file if trachea_file.exists() and extract_trachea else None,
+                output_path=scaffold_file
+            )
+
+            if scaffold is not None:
+                logger.info("✓ 数字肺底座已生成")
+                logger.info(f"  - {scaffold_file}")
+            else:
+                logger.warning("⚠ 数字肺底座生成失败")
+        except ImportError as e:
+            logger.warning(f"⚠ 无法导入融合模块: {e}")
+        except Exception as e:
+            logger.warning(f"⚠ 数字肺底座生成失败: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
 
     # 生成完整底座三视图可视化
     if mask_file.exists() or lobes_file.exists():

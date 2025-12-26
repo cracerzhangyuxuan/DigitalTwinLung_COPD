@@ -361,17 +361,124 @@ def generate_template_mask_from_inputs(
     return output_mask_path
 
 
+def skeleton_fusion_trachea(
+    probability_map: np.ndarray,
+    soft_threshold: float = 0.25,
+    min_branch_size: int = 50,
+    min_radius: int = 1,
+    max_radius: int = 10
+) -> np.ndarray:
+    """
+    使用骨架化融合算法生成气管树模板
+
+    流程：
+    1. 软阈值（0.25）保留所有潜在分支
+    2. 骨架化提取 1 像素宽中心线
+    3. 剪枝去除小碎片（<50 体素）
+    4. 距离变换估计半径
+    5. 重建气管树体积
+
+    优势：
+    - 体素数更合理（50,000-80,000 范围）
+    - 结构更细致、连续
+    - 去除肺血管噪声
+    - 保留解剖学意义的分支结构
+
+    Args:
+        probability_map: 概率图（0-1 范围，来自投票累积）
+        soft_threshold: 软阈值，低阈值保持连通性（默认 0.25）
+        min_branch_size: 最小分支大小，用于剪枝（默认 50 体素）
+        min_radius: 最小重建半径（默认 1）
+        max_radius: 最大重建半径（默认 10）
+
+    Returns:
+        final_airway: 骨架化重建后的气管树 mask
+    """
+    try:
+        from skimage.morphology import skeletonize_3d, remove_small_objects, ball
+        from scipy.ndimage import distance_transform_edt, binary_dilation
+    except ImportError:
+        logger.warning("骨架化需要 scikit-image，回退到简单阈值")
+        return (probability_map > soft_threshold).astype(np.uint8)
+
+    logger.info("  使用骨架化融合算法...")
+
+    # 1. 软阈值（低阈值保持连通性）
+    soft_mask = probability_map > soft_threshold
+    logger.info(f"    软阈值 {soft_threshold}: {np.sum(soft_mask):,} 体素")
+
+    # 2. 骨架化（提取 1 像素宽中心线）
+    logger.info("    骨架化提取中心线...")
+    skeleton = skeletonize_3d(soft_mask.astype(np.uint8))
+    skeleton = skeleton > 0
+    logger.info(f"    骨架体素数: {np.sum(skeleton):,}")
+
+    # 3. 剪枝（去除小碎片）
+    skeleton_cleaned = remove_small_objects(skeleton, min_size=min_branch_size)
+    logger.info(f"    剪枝后骨架: {np.sum(skeleton_cleaned):,} 体素")
+
+    # 4. 半径估计（基于距离变换）
+    # 在软 mask 内计算到边界的距离，作为每个骨架点的半径
+    edt_map = distance_transform_edt(soft_mask)
+    radius_on_skeleton = edt_map * skeleton_cleaned
+
+    # 5. 重建气管树（在每个骨架点处绘制球体）
+    logger.info("    重建气管树体积...")
+    final_airway = np.zeros_like(probability_map, dtype=np.uint8)
+
+    # 获取所有骨架点
+    skeleton_points = np.argwhere(skeleton_cleaned)
+
+    if len(skeleton_points) == 0:
+        logger.warning("    骨架为空，回退到简单阈值")
+        return (probability_map > soft_threshold).astype(np.uint8)
+
+    # 为了效率，按半径分组处理
+    unique_radii = np.unique(np.round(radius_on_skeleton[skeleton_cleaned]).astype(int))
+    unique_radii = unique_radii[unique_radii > 0]  # 排除 0
+
+    for r in unique_radii:
+        r = max(min_radius, min(r, max_radius))  # 限制半径范围
+
+        # 找到该半径的所有骨架点
+        mask_r = (np.round(radius_on_skeleton) == r) & skeleton_cleaned
+        if np.sum(mask_r) == 0:
+            continue
+
+        # 创建球形结构元素
+        struct = ball(r)
+
+        # 膨胀该半径的骨架点
+        dilated = binary_dilation(mask_r, structure=struct)
+        final_airway = np.maximum(final_airway, dilated.astype(np.uint8))
+
+    # 6. 后处理：保留最大连通域
+    if ndimage is not None:
+        labeled, num_features = ndimage.label(final_airway)
+        if num_features > 1:
+            sizes = ndimage.sum(final_airway, labeled, range(1, num_features + 1))
+            largest_idx = np.argmax(sizes) + 1
+            final_airway = (labeled == largest_idx).astype(np.uint8)
+            logger.info(f"    保留最大连通域（共 {num_features} 个）")
+
+    final_voxels = np.sum(final_airway)
+    logger.info(f"    ✓ 骨架化重建完成: {final_voxels:,} 体素")
+
+    return final_airway
+
+
 def generate_template_trachea_mask(
     template_path: Union[str, Path],
     input_image_paths: List[Union[str, Path]],
     input_trachea_paths: List[Union[str, Path]],
     output_trachea_path: Union[str, Path],
-    threshold: float = 0.25  # 降低阈值以保留更多分支结构
+    threshold: float = 0.25,
+    use_skeleton: bool = True
 ) -> Optional[Path]:
     """
     从输入气管树 mask 配准生成模板气管树 mask
 
-    通过将多个输入样本的气管树 mask 配准到模板空间并投票，
+    通过将多个输入样本的气管树 mask 配准到模板空间并融合，
     生成标准模板的气管树 mask。
 
     Args:
@@ -379,14 +486,15 @@ def generate_template_trachea_mask(
         input_image_paths: 输入图像路径列表
         input_trachea_paths: 对应的输入气管树 mask 路径列表
         output_trachea_path: 输出气管树模板 mask 路径
-        threshold: 投票阈值（默认 0.5）
+        threshold: 投票阈值（默认 0.25，用于骨架化的软阈值）
+        use_skeleton: 是否使用骨架化融合算法（默认 True）
 
     Returns:
         output_trachea_path: 生成的气管树模板 mask 路径，失败返回 None
 
     Note:
-        气管树结构相对稳定，配准后应保持连续性。
-        如果连通性检查失败，将输出警告但仍保存结果。
+        默认使用骨架化融合算法，可生成更细致、体素数更合理的气管树。
+        如果 use_skeleton=False，则使用传统投票阈值方法。
     """
     if not check_ants_available():
         raise ImportError("ANTsPy 不可用")
@@ -395,6 +503,7 @@ def generate_template_trachea_mask(
     logger.info("生成模板气管树 mask...")
     logger.info(f"  输入图像数: {len(input_image_paths)}")
     logger.info(f"  输入气管 mask 数: {len(input_trachea_paths)}")
+    logger.info(f"  融合算法: {'骨架化融合' if use_skeleton else '简单投票'}")
     logger.info("=" * 60)
 
     # 检查输入
@@ -449,30 +558,40 @@ def generate_template_trachea_mask(
         logger.error("没有成功配准任何气管树 mask")
         return None
 
-    # 投票生成最终 mask
+    # 计算概率图
     probability_map = accumulated_mask / valid_count
-    final_trachea_mask = (probability_map >= threshold).astype(np.uint8)
 
-    # 形态学清理（保守处理以保留分支结构）
-    if ndimage is not None:
-        from scipy.ndimage import binary_closing, binary_dilation
-        # 仅使用闭操作保持连续性，不使用开操作（会移除细小分支）
-        final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
-        # 轻微膨胀以连接断裂的分支
-        final_trachea_mask = binary_dilation(final_trachea_mask, iterations=1).astype(np.uint8)
-        final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
+    # 根据参数选择融合算法
+    if use_skeleton:
+        # 使用骨架化融合算法
+        final_trachea_mask = skeleton_fusion_trachea(
+            probability_map,
+            soft_threshold=threshold,
+            min_branch_size=50,
+            min_radius=1,
+            max_radius=8
+        )
+    else:
+        # 传统投票阈值方法
+        final_trachea_mask = (probability_map >= threshold).astype(np.uint8)
 
-    # 连通性验证
-    if ndimage is not None:
-        labeled, num_features = ndimage.label(final_trachea_mask)
-        if num_features > 1:
-            # 保留最大连通域（主气管树）
-            sizes = ndimage.sum(final_trachea_mask, labeled, range(1, num_features + 1))
-            largest_idx = np.argmax(sizes) + 1
-            final_trachea_mask = (labeled == largest_idx).astype(np.uint8)
-            logger.warning(f"  气管树有 {num_features} 个连通域，保留最大的")
-        else:
-            logger.info(f"  ✓ 气管树连续性检查通过")
+        # 形态学清理（保守处理以保留分支结构）
+        if ndimage is not None:
+            from scipy.ndimage import binary_closing, binary_dilation
+            final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
+            final_trachea_mask = binary_dilation(final_trachea_mask, iterations=1).astype(np.uint8)
+            final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
+
+        # 连通性验证
+        if ndimage is not None:
+            labeled, num_features = ndimage.label(final_trachea_mask)
+            if num_features > 1:
+                sizes = ndimage.sum(final_trachea_mask, labeled, range(1, num_features + 1))
+                largest_idx = np.argmax(sizes) + 1
+                final_trachea_mask = (labeled == largest_idx).astype(np.uint8)
+                logger.warning(f"  气管树有 {num_features} 个连通域，保留最大的")
+            else:
+                logger.info(f"  ✓ 气管树连续性检查通过")
 
     # 保存
     output_trachea_path = Path(output_trachea_path)
@@ -483,6 +602,14 @@ def generate_template_trachea_mask(
     final_voxels = np.sum(final_trachea_mask)
     logger.info(f"气管树模板 mask 已保存（从 {valid_count} 个输入生成）: {output_trachea_path}")
     logger.info(f"  气管树体素数: {final_voxels:,}")
+
+    # 体素数范围检查
+    if final_voxels < 30000:
+        logger.warning(f"  ⚠️ 气管树体素数偏少 ({final_voxels:,})，可能有分支丢失")
+    elif final_voxels > 100000:
+        logger.warning(f"  ⚠️ 气管树体素数偏多 ({final_voxels:,})，可能包含噪声")
+    else:
+        logger.info(f"  ✓ 气管树体素数在正常范围内 (30,000-100,000)")
 
     return output_trachea_path
 
@@ -767,6 +894,343 @@ def generate_template_lung_lobes_jlf(
         logger.info(f"  {lobe_names[label]}: {count:,} 体素")
 
     return output_lobes_path
+
+
+def generate_template_lung_lobes_staple(
+    template_path: Union[str, Path],
+    input_image_paths: List[Union[str, Path]],
+    input_lobes_paths: List[Union[str, Path]],
+    output_lobes_path: Union[str, Path],
+    foreground_value: float = 1.0,
+    max_iterations: int = 20
+) -> Optional[Path]:
+    """
+    使用 STAPLE (Simultaneous Truth and Performance Level Estimation) 算法
+    生成模板肺叶标签 mask
+
+    STAPLE 算法优势:
+    - 概率性估计：同时估计"真实的金标准"和"每个样本的性能参数"
+    - 自动加权：给更可靠的样本更高的权重
+    - 对异常样本鲁棒：自动降低异常/低质量样本的权重
+    - 适合样本质量参差不齐的场景
+
+    工作原理:
+    1. 初始化：假设所有样本同等可靠
+    2. E 步：基于当前性能估计，计算每个体素的"真实标签"概率
+    3. M 步：基于当前"真实标签"估计，更新每个样本的性能参数
+    4. 迭代直到收敛
+
+    Args:
+        template_path: 模板 CT 路径
+        input_image_paths: 输入图像路径列表
+        input_lobes_paths: 输入肺叶标签 mask 路径列表
+        output_lobes_path: 输出肺叶标签模板路径
+        foreground_value: 前景值（默认 1.0）
+        max_iterations: 最大迭代次数（默认 20）
+
+    Returns:
+        output_lobes_path: 生成的肺叶模板路径，失败返回 None
+
+    Note:
+        需要安装 SimpleITK。STAPLE 对每个标签单独处理。
+    """
+    try:
+        import SimpleITK as sitk
+    except ImportError:
+        logger.error("STAPLE 需要 SimpleITK，请安装: pip install SimpleITK")
+        raise ImportError("SimpleITK 不可用，无法使用 STAPLE 算法")
+
+    if not check_ants_available():
+        raise ImportError("ANTsPy 不可用")
+
+    logger.info("=" * 60)
+    logger.info("使用 STAPLE 算法生成模板肺叶标签...")
+    logger.info(f"  输入图像数: {len(input_image_paths)}")
+    logger.info(f"  STAPLE 参数: foreground_value={foreground_value}, max_iter={max_iterations}")
+    logger.info("=" * 60)
+
+    if len(input_lobes_paths) == 0:
+        logger.warning("没有输入肺叶标签 mask，跳过生成")
+        return None
+
+    # 加载模板
+    template = ants.image_read(str(template_path))
+    template_shape = template.shape
+
+    # 配准所有标签到模板空间
+    warped_labels_np = []
+
+    for i, (img_path, lobes_path) in enumerate(zip(input_image_paths, input_lobes_paths)):
+        img_path = Path(img_path)
+        lobes_path = Path(lobes_path)
+
+        if not img_path.exists() or not lobes_path.exists():
+            logger.warning(f"  [{i+1}] 文件缺失，跳过")
+            continue
+
+        try:
+            img = ants.image_read(str(img_path))
+            lobes_mask = ants.image_read(str(lobes_path))
+
+            logger.info(f"  [{i+1}/{len(input_image_paths)}] 配准: {img_path.name}")
+            registration = ants.registration(
+                fixed=template,
+                moving=img,
+                type_of_transform='SyN'
+            )
+
+            # 应用变换到标签（使用最近邻插值）
+            warped_label = ants.apply_transforms(
+                fixed=template,
+                moving=lobes_mask,
+                transformlist=registration['fwdtransforms'],
+                interpolator='nearestNeighbor'
+            )
+
+            warped_labels_np.append(warped_label.numpy().astype(np.uint8))
+            logger.info(f"    ✓ 配准成功")
+
+        except Exception as e:
+            logger.warning(f"  [{i+1}] 配准失败: {e}")
+            continue
+
+    if len(warped_labels_np) < 2:
+        logger.error("有效的配准结果不足（需要至少 2 个），回退到简单投票")
+        return generate_template_lung_lobes(
+            template_path, input_image_paths, input_lobes_paths, output_lobes_path
+        )
+
+    # STAPLE 对每个标签（1-5）单独处理
+    logger.info(f"执行 STAPLE 融合（{len(warped_labels_np)} 个样本）...")
+
+    # 创建最终结果数组
+    final_lobes = np.zeros(template_shape, dtype=np.uint8)
+
+    lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
+
+    for label_id in range(1, 6):
+        logger.info(f"  处理标签 {label_id} ({lobe_names[label_id]})...")
+
+        # 提取每个样本的二值 mask（当前标签）
+        binary_masks = []
+        for wl in warped_labels_np:
+            binary_mask = (wl == label_id).astype(np.uint8)
+            binary_masks.append(binary_mask)
+
+        # 转换为 SimpleITK 图像列表
+        sitk_masks = []
+        for bm in binary_masks:
+            sitk_img = sitk.GetImageFromArray(bm)
+            sitk_masks.append(sitk_img)
+
+        # 执行 STAPLE
+        try:
+            staple_filter = sitk.STAPLEImageFilter()
+            staple_filter.SetForegroundValue(foreground_value)
+            staple_filter.SetMaximumIterations(max_iterations)
+
+            # STAPLE 返回概率图
+            staple_prob = staple_filter.Execute(sitk_masks)
+            staple_np = sitk.GetArrayFromImage(staple_prob)
+
+            # 使用 0.5 阈值转换为二值
+            binary_result = (staple_np > 0.5).astype(np.uint8)
+
+            # 合并到最终结果（STAPLE 结果覆盖之前的标签）
+            final_lobes[binary_result > 0] = label_id
+
+            voxel_count = np.sum(binary_result > 0)
+            logger.info(f"    ✓ {lobe_names[label_id]}: {voxel_count:,} 体素")
+
+        except Exception as e:
+            logger.warning(f"    STAPLE 失败: {e}，使用投票回退")
+            # 简单投票回退
+            accumulated = np.sum(binary_masks, axis=0)
+            threshold = len(binary_masks) / 2
+            binary_result = (accumulated >= threshold).astype(np.uint8)
+            final_lobes[binary_result > 0] = label_id
+
+    # 处理标签冲突（可能有重叠区域）
+    # 使用最高优先级标签（右下叶 > 右上叶 > 右中叶 > 左下叶 > 左上叶）
+    # 实际上上面的循环已经自然处理了（后面的标签覆盖前面的）
+
+    # 保存结果
+    output_lobes_path = Path(output_lobes_path)
+    output_lobes_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _, affine = load_nifti(template_path, return_affine=True)
+    save_nifti(final_lobes, output_lobes_path, affine=affine, dtype="uint8")
+
+    logger.info(f"STAPLE 肺叶模板已保存: {output_lobes_path}")
+
+    # 统计最终结果
+    for label_id in range(1, 6):
+        count = np.sum(final_lobes == label_id)
+        logger.info(f"  {lobe_names[label_id]}: {count:,} 体素")
+
+    return output_lobes_path
+
+
+def refine_lung_atlas(
+    input_path: Union[str, Path],
+    output_path: Optional[Union[str, Path]] = None,
+    kernel_radius: int = 2,
+    max_rms_error: float = 0.05
+) -> Optional[Path]:
+    """
+    优化 Atlas 肺叶标签质量
+
+    对生成的肺叶标签进行后处理，解决以下问题：
+    - 边界锯齿状（配准误差累积）
+    - 内部小空洞（血管噪声）
+    - 孤立碎片（投票算法残留）
+
+    处理流程（对每个肺叶 1-5 独立处理）：
+    1. 形态学闭运算：填充内部空洞
+    2. 最大连通域：去除孤立碎片
+    3. 抗锯齿平滑：平滑边界
+
+    Args:
+        input_path: 输入肺叶标签 mask 路径
+        output_path: 输出路径（默认在输入路径基础上添加 _refined 后缀）
+        kernel_radius: 形态学运算核半径（默认 2，单位：体素）
+        max_rms_error: 抗锯齿平滑的最大 RMS 误差（默认 0.05，越小越平滑）
+
+    Returns:
+        output_path: 优化后的肺叶标签路径，失败返回 None
+
+    Note:
+        需要安装 SimpleITK。该函数会保留原始文件，生成新的优化版本。
+    """
+    try:
+        import SimpleITK as sitk
+    except ImportError:
+        logger.error("后处理需要 SimpleITK，请安装: pip install SimpleITK")
+        return None
+
+    input_path = Path(input_path)
+    if not input_path.exists():
+        logger.error(f"输入文件不存在: {input_path}")
+        return None
+
+    # 设置输出路径
+    if output_path is None:
+        output_path = input_path.parent / input_path.name.replace('.nii.gz', '_refined.nii.gz')
+    output_path = Path(output_path)
+
+    logger.info("=" * 60)
+    logger.info("Atlas 肺叶标签后处理优化")
+    logger.info("=" * 60)
+    logger.info(f"  输入: {input_path}")
+    logger.info(f"  输出: {output_path}")
+    logger.info(f"  形态学核半径: {kernel_radius}")
+    logger.info(f"  抗锯齿 RMS: {max_rms_error}")
+
+    # 读取输入图像
+    image = sitk.ReadImage(str(input_path))
+    image_array = sitk.GetArrayFromImage(image)
+
+    # 创建最终结果数组
+    final_array = np.zeros_like(image_array, dtype=np.uint8)
+
+    # 肺叶名称映射
+    lobe_names = {1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"}
+
+    # 统计原始体素数
+    logger.info("")
+    logger.info("原始体素统计:")
+    for label_id in range(1, 6):
+        count = np.sum(image_array == label_id)
+        logger.info(f"  {lobe_names[label_id]}: {count:,}")
+
+    # 对每个肺叶标签（1-5）独立处理
+    logger.info("")
+    logger.info("处理各肺叶...")
+
+    for label_id in range(1, 6):
+        logger.info(f"  处理标签 {label_id} ({lobe_names[label_id]})...")
+
+        # A. 提取二值 mask
+        binary_mask = sitk.BinaryThreshold(
+            image,
+            lowerThreshold=label_id,
+            upperThreshold=label_id,
+            insideValue=1,
+            outsideValue=0
+        )
+
+        original_count = np.sum(sitk.GetArrayFromImage(binary_mask) > 0)
+        if original_count == 0:
+            logger.warning(f"    标签 {label_id} 无体素，跳过")
+            continue
+
+        # B. 形态学闭运算（填充空洞）
+        try:
+            closer = sitk.BinaryMorphologicalClosingImageFilter()
+            closer.SetKernelRadius([kernel_radius] * 3)
+            closer.SetKernelType(sitk.sitkBall)
+            binary_mask = closer.Execute(binary_mask)
+        except Exception as e:
+            logger.warning(f"    形态学闭运算失败: {e}")
+
+        # C. 保留最大连通域（去除碎片）
+        try:
+            # 使用连通域标记
+            cc_filter = sitk.ConnectedComponentImageFilter()
+            labeled_cc = cc_filter.Execute(binary_mask)
+
+            # 重新标记，按大小排序（最大的标签为 1）
+            relabel_filter = sitk.RelabelComponentImageFilter()
+            relabel_filter.SetMinimumObjectSize(100)  # 过滤小于 100 体素的碎片
+            relabeled = relabel_filter.Execute(labeled_cc)
+
+            # 只保留最大连通域（标签 1）
+            binary_mask = sitk.BinaryThreshold(relabeled, 1, 1, 1, 0)
+        except Exception as e:
+            logger.warning(f"    连通域处理失败: {e}")
+
+        # D. 边界平滑（抗锯齿）
+        try:
+            # 将二值 mask 转换为 float 类型
+            float_mask = sitk.Cast(binary_mask, sitk.sitkFloat32)
+
+            # 使用抗锯齿滤波器平滑边界
+            smoother = sitk.AntiAliasBinaryImageFilter()
+            smoother.SetMaximumRMSError(max_rms_error)
+            smoother.SetNumberOfIterations(100)  # 默认迭代次数
+            smooth_mask = smoother.Execute(binary_mask)
+
+            # 转回二值（使用 0 作为阈值，因为抗锯齿输出是 signed distance field）
+            binary_mask = sitk.BinaryThreshold(smooth_mask, -100, 0, 1, 0)
+        except Exception as e:
+            logger.warning(f"    边界平滑失败: {e}")
+
+        # E. 提取结果并合并到最终数组
+        result_array = sitk.GetArrayFromImage(binary_mask)
+        final_array[result_array > 0] = label_id
+
+        final_count = np.sum(result_array > 0)
+        change_pct = (final_count - original_count) / original_count * 100 if original_count > 0 else 0
+        logger.info(f"    ✓ {original_count:,} → {final_count:,} ({change_pct:+.1f}%)")
+
+    # 保存结果
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 使用 SimpleITK 保存（保持原始的空间信息）
+    final_image = sitk.GetImageFromArray(final_array)
+    final_image.CopyInformation(image)
+    sitk.WriteImage(final_image, str(output_path))
+
+    logger.info("")
+    logger.info("优化后体素统计:")
+    for label_id in range(1, 6):
+        count = np.sum(final_array == label_id)
+        logger.info(f"  {lobe_names[label_id]}: {count:,}")
+
+    logger.info("")
+    logger.info(f"✓ 后处理完成: {output_path}")
+
+    return output_path
 
 
 def validate_trachea_continuity(
@@ -1366,7 +1830,9 @@ def main(
     num_images: Optional[int] = None,
     skip_evaluation: bool = False,
     quick_test: bool = False,
-    skip_template_build: bool = False
+    skip_template_build: bool = False,
+    use_voting: bool = False,
+    use_staple: bool = False
 ) -> Dict:
     """
     主函数 - 从配置运行完整的 Atlas 构建流程
@@ -1377,6 +1843,8 @@ def main(
         skip_evaluation: 是否跳过质量评估步骤
         quick_test: 快速测试模式（使用较少迭代和图像）
         skip_template_build: 是否跳过 Step 1（模板构建），直接从 Step 2 开始
+        use_voting: 是否使用简单投票算法（默认 False，即使用 JLF）
+        use_staple: 是否使用 STAPLE 算法（优先级高于 JLF）
 
     Returns:
         result: 包含模板路径、mask 路径、验证结果等
@@ -1578,17 +2046,92 @@ def main(
         logger.info("")
         logger.info(f"Step {current_step}/{total_steps}: 生成模板肺叶标签 mask...")
         logger.info(f"  配准样本数: {len(image_paths)} CT, {len(lobes_mask_paths)} 肺叶标签")
-        try:
-            lobes_result = generate_template_lung_lobes(
-                template_path=template_path,
-                input_image_paths=image_paths,  # 使用全部样本
-                input_lobes_paths=lobes_mask_paths,  # 使用全部样本
-                output_lobes_path=lobes_path
-            )
-            if lobes_result:
-                logger.info(f"  ✓ 肺叶标签模板已生成")
-        except Exception as e:
-            logger.warning(f"肺叶标签模板生成失败（非致命错误）: {e}")
+
+        # 算法优先级：STAPLE > 简单投票 > JLF（默认）
+        if use_staple:
+            logger.info("  算法: STAPLE (概率估计) - 自动评估样本可靠性")
+            try:
+                lobes_result = generate_template_lung_lobes_staple(
+                    template_path=template_path,
+                    input_image_paths=image_paths,
+                    input_lobes_paths=lobes_mask_paths,
+                    output_lobes_path=lobes_path
+                )
+                if lobes_result:
+                    logger.info(f"  ✓ 肺叶标签模板已生成 (STAPLE)")
+            except Exception as e:
+                logger.warning(f"STAPLE 肺叶标签生成失败: {e}")
+                logger.info("  回退到 JLF 算法...")
+                try:
+                    lobes_result = generate_template_lung_lobes_jlf(
+                        template_path=template_path,
+                        input_image_paths=image_paths,
+                        input_lobes_paths=lobes_mask_paths,
+                        output_lobes_path=lobes_path
+                    )
+                except Exception as e2:
+                    logger.warning(f"JLF 也失败，回退到简单投票: {e2}")
+                    lobes_result = generate_template_lung_lobes(
+                        template_path=template_path,
+                        input_image_paths=image_paths,
+                        input_lobes_paths=lobes_mask_paths,
+                        output_lobes_path=lobes_path
+                    )
+        elif use_voting:
+            logger.info("  算法: 简单投票 (--use-voting)")
+            try:
+                lobes_result = generate_template_lung_lobes(
+                    template_path=template_path,
+                    input_image_paths=image_paths,
+                    input_lobes_paths=lobes_mask_paths,
+                    output_lobes_path=lobes_path
+                )
+                if lobes_result:
+                    logger.info(f"  ✓ 肺叶标签模板已生成 (投票)")
+            except Exception as e:
+                logger.warning(f"投票算法失败（非致命错误）: {e}")
+        else:
+            # 默认使用 JLF
+            logger.info("  算法: Joint Label Fusion (JLF) - 默认高精度模式")
+            try:
+                lobes_result = generate_template_lung_lobes_jlf(
+                    template_path=template_path,
+                    input_image_paths=image_paths,
+                    input_lobes_paths=lobes_mask_paths,
+                    output_lobes_path=lobes_path
+                )
+                if lobes_result:
+                    logger.info(f"  ✓ 肺叶标签模板已生成 (JLF)")
+            except Exception as e:
+                logger.warning(f"JLF 肺叶标签生成失败: {e}")
+                logger.info("  回退到简单投票算法...")
+                try:
+                    lobes_result = generate_template_lung_lobes(
+                        template_path=template_path,
+                        input_image_paths=image_paths,
+                        input_lobes_paths=lobes_mask_paths,
+                        output_lobes_path=lobes_path
+                    )
+                except Exception as e2:
+                    logger.warning(f"投票算法也失败: {e2}")
+
+        # 肺叶标签后处理优化
+        if lobes_result and lobes_path.exists():
+            logger.info("")
+            logger.info("执行肺叶标签后处理优化...")
+            try:
+                refined_lobes_path = output_dir / 'standard_lung_lobes_labeled_refined.nii.gz'
+                refined_result = refine_lung_atlas(
+                    input_path=lobes_path,
+                    output_path=refined_lobes_path,
+                    kernel_radius=2,
+                    max_rms_error=0.05
+                )
+                if refined_result:
+                    logger.info(f"  ✓ 优化版肺叶标签已保存: {refined_lobes_path}")
+            except Exception as e:
+                logger.warning(f"后处理优化失败（非致命错误）: {e}")
+
         current_step += 1
 
     # Step N: 验证 Atlas
@@ -1698,6 +2241,18 @@ if __name__ == "__main__":
     parser.add_argument('--skip-eval', action='store_true', help='跳过质量评估')
     parser.add_argument('--quick-test', action='store_true', help='快速测试模式')
 
+    # 肺叶融合算法选择（互斥参数组）
+    fusion_group = parser.add_mutually_exclusive_group()
+    fusion_group.add_argument(
+        '--use-voting', action='store_true',
+        help='使用简单投票算法进行肺叶融合（速度快但精度较低）'
+    )
+    fusion_group.add_argument(
+        '--use-staple', action='store_true',
+        help='使用 STAPLE 算法进行肺叶融合（自动评估样本可靠性）'
+    )
+    # 注意：默认使用 JLF 算法，无需额外参数
+
     args = parser.parse_args()
 
     # 加载配置
@@ -1710,10 +2265,145 @@ if __name__ == "__main__":
         config=config,
         num_images=args.num_images,
         skip_evaluation=args.skip_eval,
-        quick_test=args.quick_test
+        quick_test=args.quick_test,
+        use_voting=args.use_voting,
+        use_staple=args.use_staple
     )
 
     # 返回退出码
     import sys
     sys.exit(0 if result.get('success') else 1)
+
+
+# =============================================================================
+# 数字肺底座融合函数
+# =============================================================================
+
+def create_digital_lung_scaffold(
+    lobes_path: Union[str, Path],
+    trachea_path: Optional[Union[str, Path]] = None,
+    output_path: Optional[Union[str, Path]] = None,
+    trachea_label: int = 6
+) -> Tuple[Optional[np.ndarray], Dict]:
+    """
+    创建融合的数字肺底座（5 肺叶 + 气管树）
+
+    将肺叶标签 mask 和气管树 mask 融合为单个 NIfTI 文件，
+    用于后续的 3D 可视化和 COPD 特征映射。
+
+    标签映射：
+        0 = 背景
+        1 = 左上叶 (Left Upper Lobe)
+        2 = 左下叶 (Left Lower Lobe)
+        3 = 右上叶 (Right Upper Lobe)
+        4 = 右中叶 (Right Middle Lobe)
+        5 = 右下叶 (Right Lower Lobe)
+        6 = 气管树 (Trachea & Bronchi)
+
+    Args:
+        lobes_path: 肺叶标签 mask 文件路径 (1-5)
+        trachea_path: 气管树 mask 文件路径（可选）
+        output_path: 输出融合文件路径（可选）
+        trachea_label: 气管树标签值（默认 6）
+
+    Returns:
+        scaffold: 融合后的标签 mask (uint8)
+        stats: 融合统计信息字典
+
+    Usage:
+        scaffold, stats = create_digital_lung_scaffold(
+            lobes_path="data/02_atlas/standard_lung_lobes_labeled.nii.gz",
+            trachea_path="data/02_atlas/standard_trachea_mask.nii.gz",
+            output_path="data/02_atlas/digital_lung_scaffold.nii.gz"
+        )
+    """
+    import nibabel as nib
+
+    lobes_path = Path(lobes_path)
+    stats = {
+        'lobes_path': str(lobes_path),
+        'trachea_path': str(trachea_path) if trachea_path else None,
+        'include_trachea': trachea_path is not None,
+        'lobe_voxels': {},
+        'trachea_voxels': 0,
+        'overlap_voxels': 0,
+        'total_voxels': 0
+    }
+
+    logger.info("=" * 60)
+    logger.info("创建数字肺底座（Digital Lung Scaffold）")
+    logger.info("=" * 60)
+
+    # 加载肺叶标签
+    if not lobes_path.exists():
+        logger.error(f"肺叶标签文件不存在: {lobes_path}")
+        return None, stats
+
+    lobes_nii = nib.load(str(lobes_path))
+    lobes_data = np.asanyarray(lobes_nii.dataobj).astype(np.uint8)
+    affine = lobes_nii.affine
+
+    logger.info(f"  肺叶标签: {lobes_path.name}")
+    logger.info(f"  数据形状: {lobes_data.shape}")
+
+    # 统计每个肺叶的体素数
+    lobe_names = {
+        1: "左上叶", 2: "左下叶", 3: "右上叶", 4: "右中叶", 5: "右下叶"
+    }
+    for label in range(1, 6):
+        count = np.sum(lobes_data == label)
+        stats['lobe_voxels'][label] = int(count)
+        logger.info(f"    标签 {label} ({lobe_names[label]}): {count:,} 体素")
+
+    # 初始化融合结果（复制肺叶标签）
+    scaffold = lobes_data.copy()
+
+    # 加载并融合气管树（如果提供）
+    if trachea_path is not None:
+        trachea_path = Path(trachea_path)
+        if trachea_path.exists():
+            trachea_nii = nib.load(str(trachea_path))
+            trachea_data = np.asanyarray(trachea_nii.dataobj) > 0
+
+            # 检查形状一致性
+            if trachea_data.shape != lobes_data.shape:
+                logger.error(f"形状不匹配: 肺叶 {lobes_data.shape} vs 气管树 {trachea_data.shape}")
+                return None, stats
+
+            # 计算重叠区域
+            overlap = (lobes_data > 0) & trachea_data
+            stats['overlap_voxels'] = int(np.sum(overlap))
+
+            # 融合策略：气管树优先（覆盖肺叶重叠区域）
+            # 这确保气管树在可视化时完整显示
+            scaffold[trachea_data] = trachea_label
+            stats['trachea_voxels'] = int(np.sum(trachea_data))
+
+            logger.info(f"  气管树: {trachea_path.name}")
+            logger.info(f"    气管树体素: {stats['trachea_voxels']:,}")
+            logger.info(f"    重叠区域: {stats['overlap_voxels']:,} 体素（已被气管树覆盖）")
+        else:
+            logger.warning(f"气管树文件不存在: {trachea_path}")
+
+    # 计算总体素数
+    stats['total_voxels'] = int(np.sum(scaffold > 0))
+    logger.info(f"  融合结果:")
+    logger.info(f"    总体素数: {stats['total_voxels']:,}")
+    logger.info(f"    唯一标签: {np.unique(scaffold).tolist()}")
+
+    # 保存结果
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        scaffold_nii = nib.Nifti1Image(scaffold, affine)
+        nib.save(scaffold_nii, str(output_path))
+
+        file_size = output_path.stat().st_size / 1024 / 1024
+        logger.info(f"  ✅ 数字肺底座已保存: {output_path}")
+        logger.info(f"     文件大小: {file_size:.1f} MB")
+
+    logger.info("=" * 60)
+
+    return scaffold, stats
 
