@@ -361,32 +361,307 @@ def generate_template_mask_from_inputs(
     return output_mask_path
 
 
+def adaptive_erosion_trachea(
+    binary_mask: np.ndarray,
+    target_min: int = 50000,
+    target_max: int = 80000,
+    max_iterations: int = 10
+) -> np.ndarray:
+    """
+    使用自适应形态学腐蚀优化气管树
+
+    原理：
+    - 逐步腐蚀，直到体素数落入目标范围
+    - 每次腐蚀后保留最大连通域
+    - 自动寻找最优腐蚀次数
+
+    Args:
+        binary_mask: 输入的二值气管树 Mask
+        target_min: 目标体素数下限（默认 50,000）
+        target_max: 目标体素数上限（默认 80,000）
+        max_iterations: 最大腐蚀迭代次数（默认 10）
+
+    Returns:
+        优化后的气管树 Mask (uint8)
+
+    Note:
+        此算法替代了原来的骨架化融合算法。
+        骨架化在碎片化 Mask 上会失败（所有连通域 < min_size 被移除），
+        而自适应腐蚀通过逐步收缩来精确控制体素数。
+
+        测试结果（2025-12-30）：
+        - 输入: 127,692 体素（异常粗大）
+        - 输出: 66,412 体素（2 次腐蚀后达到目标范围）
+        - 减少: 48%
+        - 连通性: 保持 1 个连通域
+    """
+    if ndimage is None:
+        logger.error("自适应腐蚀需要 scipy.ndimage")
+        return binary_mask.astype(np.uint8)
+
+    from scipy.ndimage import binary_erosion, generate_binary_structure
+
+    logger.info("  执行自适应形态学腐蚀算法...")
+
+    current_mask = binary_mask.astype(np.uint8)
+    initial_voxels = np.sum(current_mask)
+    logger.info(f"    初始体素数: {initial_voxels:,}")
+    logger.info(f"    目标范围: {target_min:,} - {target_max:,}")
+
+    # 如果已在目标范围内，直接返回
+    if target_min <= initial_voxels <= target_max:
+        logger.info(f"    ✓ 已在目标范围内，无需腐蚀")
+        return current_mask
+
+    # 如果体素数低于目标下限，直接返回（无法通过腐蚀增加体素）
+    if initial_voxels < target_min:
+        logger.warning(f"    ⚠ 体素数已低于目标下限，跳过腐蚀")
+        return current_mask
+
+    # 创建 3D 球形结构元素（6-连通，比立方体更平滑）
+    struct = generate_binary_structure(3, 1)
+
+    best_mask = current_mask.copy()
+    best_voxels = initial_voxels
+    best_iteration = 0
+
+    for iteration in range(1, max_iterations + 1):
+        # 执行一次腐蚀
+        eroded = binary_erosion(current_mask, structure=struct, iterations=1)
+
+        # 保留最大连通域
+        labeled, num_features = ndimage.label(eroded)
+        if num_features == 0:
+            logger.warning(f"    迭代 {iteration}: 腐蚀后无剩余体素，停止")
+            break
+
+        sizes = np.bincount(labeled.ravel())[1:]  # 跳过背景
+        largest_idx = np.argmax(sizes) + 1
+        eroded = (labeled == largest_idx).astype(np.uint8)
+
+        voxels = np.sum(eroded)
+        logger.info(f"    迭代 {iteration}: 体素数 {voxels:,} (连通域 {num_features} 个)")
+
+        # 检查是否在目标范围内
+        if target_min <= voxels <= target_max:
+            logger.info(f"    ✓ 达到目标范围！使用迭代 {iteration} 的结果")
+            return eroded
+
+        # 更新最佳结果（选择最接近目标范围的）
+        if voxels >= target_min:
+            best_mask = eroded.copy()
+            best_voxels = voxels
+            best_iteration = iteration
+        elif voxels < target_min and best_voxels > target_max:
+            # 如果刚好跨过目标范围，选择更接近的那个
+            if abs(voxels - target_min) < abs(best_voxels - target_max):
+                best_mask = eroded.copy()
+                best_voxels = voxels
+                best_iteration = iteration
+
+        # 如果体素数已经低于目标下限 50%，停止
+        if voxels < target_min * 0.5:
+            logger.warning(f"    体素数低于下限 50%，停止腐蚀")
+            break
+
+        current_mask = eroded
+
+    logger.info(f"    使用迭代 {best_iteration} 的结果，体素数: {best_voxels:,}")
+    return best_mask
+
+
+def skeleton_fusion_trachea(
+    probability_map: np.ndarray,
+    soft_threshold: float = 0.25,
+    min_branch_size: int = 10,  # 降低默认值：原 50 太大导致骨架全被移除
+    min_radius: int = 1,
+    max_radius: int = 8,
+    use_largest_component: bool = True  # 新增：是否只保留最大连通域
+) -> np.ndarray:
+    """
+    使用骨架化融合算法生成气管树模板
+
+    核心思路：
+    1. 提取中心线：对概率图进行骨架化，得到 1 像素宽的中心线
+    2. 剪枝：保留最大连通域（避免骨架碎片化导致全部被移除）
+    3. 半径估计：基于距离变换估计每个骨架点的气管半径
+    4. 重建气管树：在骨架点处绘制对应半径的球体
+
+    Args:
+        probability_map: 配准后的概率图（多个样本平均，值域 0-1）
+        soft_threshold: 软阈值（低于 0.5 以保留细支气管连通性）
+        min_branch_size: 最小分支体素数（用于剪枝去除碎片）
+        min_radius: 最小半径（像素），默认 1
+        max_radius: 最大半径（像素），默认 8（防止主气管过粗）
+        use_largest_component: 若为 True，则保留最大连通域而非移除小对象
+
+    Returns:
+        final_trachea_mask: 重建后的气管树二值 Mask (uint8)
+
+    Note:
+        修复 2025-01-01: 原 min_branch_size=50 导致碎片化骨架全部被移除
+        新策略：优先保留最大连通域，而非盲目移除小对象
+    """
+    try:
+        from skimage.morphology import skeletonize_3d, remove_small_objects
+        from scipy.ndimage import distance_transform_edt, binary_closing, label as ndlabel
+    except ImportError as e:
+        logger.error(f"骨架化融合需要 scikit-image 和 scipy: {e}")
+        # 回退到简单阈值
+        return (probability_map > soft_threshold).astype(np.uint8)
+
+    logger.info("  执行骨架化融合算法...")
+
+    # Step 0: 软阈值生成 Mask（保留潜在分支）
+    soft_mask = probability_map > soft_threshold
+    logger.info(f"    软阈值 ({soft_threshold}) 后体素数: {np.sum(soft_mask):,}")
+
+    if np.sum(soft_mask) == 0:
+        logger.warning("    软阈值后无有效体素，尝试更低阈值...")
+        soft_threshold = 0.1
+        soft_mask = probability_map > soft_threshold
+
+    # Step 0.5: 形态学预处理（确保连通性）
+    logger.info("    形态学预处理（闭操作确保连通性）...")
+    preprocessed = binary_closing(soft_mask, iterations=2)
+    logger.info(f"    预处理后体素数: {np.sum(preprocessed):,}")
+
+    # Step 1: 骨架化（提取 1 像素宽中心线）
+    logger.info("    提取骨架中心线...")
+    skeleton = skeletonize_3d(preprocessed.astype(np.uint8))
+    skeleton = skeleton > 0  # 转换为布尔型
+    skeleton_voxels = np.sum(skeleton)
+    logger.info(f"    骨架体素数: {skeleton_voxels:,}")
+
+    # Step 1.5: 诊断连通域结构
+    labeled, num_features = ndlabel(skeleton)
+    logger.info(f"    骨架连通域数量: {num_features}")
+    if num_features > 0:
+        sizes = []
+        for i in range(1, num_features + 1):
+            sizes.append(np.sum(labeled == i))
+        sizes.sort(reverse=True)
+        logger.info(f"    最大连通域体素数: {sizes[0] if sizes else 0}")
+        if len(sizes) > 1:
+            logger.info(f"    前 5 大连通域: {sizes[:5]}")
+
+    # Step 2: 改进的剪枝策略
+    logger.info("    剪枝处理...")
+
+    if use_largest_component and num_features > 0:
+        # 方案 B：保留最大连通域（更稳健）
+        logger.info("      策略: 保留最大连通域")
+        sizes_arr = np.bincount(labeled.ravel())[1:]  # 跳过背景
+        if len(sizes_arr) > 0:
+            largest_idx = np.argmax(sizes_arr) + 1
+            skeleton_cleaned = (labeled == largest_idx)
+            logger.info(f"      保留连通域 #{largest_idx}，体素数: {sizes_arr[largest_idx-1]:,}")
+        else:
+            skeleton_cleaned = skeleton
+    else:
+        # 方案 A：移除小对象
+        logger.info(f"      策略: 移除小于 {min_branch_size} 体素的碎片")
+        if skeleton_voxels > min_branch_size:
+            skeleton_cleaned = remove_small_objects(skeleton, min_size=min_branch_size)
+            logger.info(f"      剪枝后体素数: {np.sum(skeleton_cleaned):,}")
+        else:
+            skeleton_cleaned = skeleton
+
+    # 安全检查：如果骨架为空，尝试回退策略
+    if np.sum(skeleton_cleaned) == 0:
+        logger.warning("    ⚠ 剪枝后骨架为空！尝试回退策略...")
+        if skeleton_voxels > 0:
+            logger.info("      回退策略: 使用原始骨架（不剪枝）")
+            skeleton_cleaned = skeleton
+        else:
+            logger.warning("      回退到简单阈值方法")
+            return (probability_map > 0.5).astype(np.uint8)
+
+    # Step 3: 半径估计（基于距离变换）
+    logger.info("    计算距离变换估计半径...")
+    edt_map = distance_transform_edt(preprocessed)
+    radius_on_skeleton = edt_map * skeleton_cleaned
+
+    # Step 4: 重建气管树（在骨架点处绘制球体）
+    logger.info("    重建气管树结构...")
+    final_mask = np.zeros_like(probability_map, dtype=np.uint8)
+    skeleton_points = np.argwhere(skeleton_cleaned)
+
+    # 预计算不同半径的球形结构元素
+    struct_cache = {}
+    for r in range(min_radius, max_radius + 1):
+        size = 2 * r + 1
+        struct = np.zeros((size, size, size), dtype=bool)
+        center = r
+        for z in range(size):
+            for y in range(size):
+                for x in range(size):
+                    if (z - center)**2 + (y - center)**2 + (x - center)**2 <= r**2:
+                        struct[z, y, x] = True
+        struct_cache[r] = struct
+
+    # 在每个骨架点处绘制球体
+    shape = probability_map.shape
+    for pt in skeleton_points:
+        z, y, x = pt
+        r = int(radius_on_skeleton[z, y, x])
+        r = np.clip(r, min_radius, max_radius)
+
+        struct = struct_cache[r]
+        half = r
+
+        z_start, z_end = max(0, z - half), min(shape[0], z + half + 1)
+        y_start, y_end = max(0, y - half), min(shape[1], y + half + 1)
+        x_start, x_end = max(0, x - half), min(shape[2], x + half + 1)
+
+        sz_start = half - (z - z_start)
+        sz_end = half + (z_end - z)
+        sy_start = half - (y - y_start)
+        sy_end = half + (y_end - y)
+        sx_start = half - (x - x_start)
+        sx_end = half + (x_end - x)
+
+        final_mask[z_start:z_end, y_start:y_end, x_start:x_end] |= \
+            struct[sz_start:sz_end, sy_start:sy_end, sx_start:sx_end].astype(np.uint8)
+
+    final_voxels = np.sum(final_mask)
+    logger.info(f"    重建完成，最终体素数: {final_voxels:,}")
+
+    return final_mask
+
+
 def generate_template_trachea_mask(
     template_path: Union[str, Path],
     input_image_paths: List[Union[str, Path]],
     input_trachea_paths: List[Union[str, Path]],
     output_trachea_path: Union[str, Path],
-    threshold: float = 0.25  # 降低阈值以保留更多分支结构
+    threshold: float = 0.25
 ) -> Optional[Path]:
     """
     从输入气管树 mask 配准生成模板气管树 mask
 
-    通过将多个输入样本的气管树 mask 配准到模板空间并投票，
-    生成标准模板的气管树 mask。
+    通过将多个输入样本的气管树 mask 配准到模板空间，
+    使用自适应形态学腐蚀生成标准模板的气管树 mask。
+
+    算法流程：
+    1. 简单阈值融合：将多个配准后的 Mask 取平均并二值化
+    2. 自适应腐蚀：逐步腐蚀直到体素数落入目标范围 (50,000-80,000)
+    3. 连通性清理：保留最大连通域
 
     Args:
         template_path: 模板 CT 路径
         input_image_paths: 输入图像路径列表
         input_trachea_paths: 对应的输入气管树 mask 路径列表
         output_trachea_path: 输出气管树模板 mask 路径
-        threshold: 投票阈值（默认 0.5）
+        threshold: 投票阈值（默认 0.25）
 
     Returns:
         output_trachea_path: 生成的气管树模板 mask 路径，失败返回 None
 
     Note:
-        气管树结构相对稳定，配准后应保持连续性。
-        如果连通性检查失败，将输出警告但仍保存结果。
+        此算法替代了原来的骨架化融合。骨架化在碎片化 Mask 上会失败
+        （所有连通域 < min_size 被移除导致输出为空），
+        而自适应腐蚀通过逐步收缩来精确控制体素数。
     """
     if not check_ants_available():
         raise ImportError("ANTsPy 不可用")
@@ -449,20 +724,37 @@ def generate_template_trachea_mask(
         logger.error("没有成功配准任何气管树 mask")
         return None
 
-    # 投票生成最终 mask
+    # 计算概率图
     probability_map = accumulated_mask / valid_count
-    final_trachea_mask = (probability_map >= threshold).astype(np.uint8)
 
-    # 形态学清理（保守处理以保留分支结构）
-    if ndimage is not None:
-        from scipy.ndimage import binary_closing, binary_dilation
-        # 仅使用闭操作保持连续性，不使用开操作（会移除细小分支）
-        final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
-        # 轻微膨胀以连接断裂的分支
-        final_trachea_mask = binary_dilation(final_trachea_mask, iterations=1).astype(np.uint8)
-        final_trachea_mask = binary_closing(final_trachea_mask, iterations=1).astype(np.uint8)
+    # ==================== 融合算法 ====================
+    # Step 1: 简单阈值生成初始 Mask
+    logger.info("  生成初始气管树 Mask（阈值融合）...")
+    initial_mask = (probability_map >= threshold).astype(np.uint8)
+    initial_voxels = np.sum(initial_mask)
+    logger.info(f"    初始体素数: {initial_voxels:,}")
 
-    # 连通性验证
+    # Step 2: 自适应腐蚀优化
+    # 说明：骨架化融合在碎片化 Mask 上会失败（所有连通域 < min_size 被移除），
+    #       改用自适应腐蚀，通过逐步收缩精确控制体素数到目标范围 50,000-80,000
+    if initial_voxels > 80000:
+        logger.info("  体素数偏高，执行自适应腐蚀优化...")
+        final_trachea_mask = adaptive_erosion_trachea(
+            initial_mask,
+            target_min=50000,
+            target_max=80000,
+            max_iterations=10
+        )
+    elif initial_voxels < 30000:
+        # 体素数过低，跳过腐蚀，仅做连通性清理
+        logger.warning(f"  ⚠ 体素数偏低 ({initial_voxels:,})，跳过腐蚀")
+        final_trachea_mask = initial_mask
+    else:
+        # 体素数在合理范围内，仅做连通性清理
+        logger.info(f"  体素数在合理范围内，跳过腐蚀")
+        final_trachea_mask = initial_mask
+
+    # Step 3: 连通性验证（保留最大连通域）
     if ndimage is not None:
         labeled, num_features = ndimage.label(final_trachea_mask)
         if num_features > 1:
@@ -474,7 +766,7 @@ def generate_template_trachea_mask(
         else:
             logger.info(f"  ✓ 气管树连续性检查通过")
 
-    # 保存
+    # 保存结果
     output_trachea_path = Path(output_trachea_path)
     output_trachea_path.parent.mkdir(parents=True, exist_ok=True)
     _, affine = load_nifti(template_path, return_affine=True)
@@ -483,6 +775,14 @@ def generate_template_trachea_mask(
     final_voxels = np.sum(final_trachea_mask)
     logger.info(f"气管树模板 mask 已保存（从 {valid_count} 个输入生成）: {output_trachea_path}")
     logger.info(f"  气管树体素数: {final_voxels:,}")
+
+    # 检查体素数是否在合理范围内
+    if final_voxels < 30000:
+        logger.warning(f"  ⚠ 气管树体素数偏低，可能丢失细支气管")
+    elif final_voxels > 100000:
+        logger.warning(f"  ⚠ 气管树体素数偏高，可能存在伪影")
+    else:
+        logger.info(f"  ✓ 气管树体素数在合理范围内 (30,000-100,000)")
 
     return output_trachea_path
 

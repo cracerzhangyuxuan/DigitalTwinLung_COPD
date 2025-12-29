@@ -27,6 +27,9 @@ Phase 2 端到端流水线（数字孪生底座构建）
     # 仅生成气管树模板（Step 2，需要已有模板）
     python run_phase2_pipeline.py --step2-only
 
+    # 仅执行可视化部分
+    python run_phase2_pipeline.py --viz-only
+
     # 限制处理数量（用于测试）
     python run_phase2_pipeline.py --limit 3
 
