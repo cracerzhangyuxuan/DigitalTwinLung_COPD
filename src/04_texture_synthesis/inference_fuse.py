@@ -16,6 +16,14 @@ try:
 except ImportError:
     torch = None
 
+try:
+    from scipy import ndimage
+    from scipy.sparse import diags, csr_matrix
+    from scipy.sparse.linalg import spsolve
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 from .network import InpaintingUNet
 from ..utils.io import load_nifti, save_nifti
 from ..utils.math_ops import normalize_ct, denormalize_ct
@@ -53,6 +61,51 @@ def load_model(
     return model
 
 
+def smooth_boundary(
+    output: np.ndarray,
+    original: np.ndarray,
+    mask: np.ndarray,
+    boundary_width: int = 3
+) -> np.ndarray:
+    """
+    平滑边界过渡（简化版泊松融合）
+
+    使用高斯加权在边界区域进行平滑过渡
+
+    Args:
+        output: 生成的输出
+        original: 原始图像
+        mask: 病灶 mask
+        boundary_width: 边界宽度
+
+    Returns:
+        smoothed: 平滑后的输出
+    """
+    if not HAS_SCIPY:
+        logger.warning("scipy 未安装，跳过边界平滑")
+        return output
+
+    from scipy import ndimage
+
+    # 创建边界区域 mask
+    dilated = ndimage.binary_dilation(mask > 0, iterations=boundary_width)
+    eroded = ndimage.binary_erosion(mask > 0, iterations=boundary_width)
+    boundary = dilated & ~eroded
+
+    # 计算距离权重
+    distance = ndimage.distance_transform_edt(~(mask > 0))
+    distance = np.clip(distance, 0, boundary_width) / boundary_width
+
+    # 在边界区域进行加权混合
+    result = output.copy()
+    result[boundary] = (
+        output[boundary] * (1 - distance[boundary]) +
+        original[boundary] * distance[boundary]
+    )
+
+    return result
+
+
 def fuse_lesion(
     template_path: Union[str, Path],
     lesion_mask_path: Union[str, Path],
@@ -62,17 +115,19 @@ def fuse_lesion(
     overlap: int = 16,
     hu_min: float = -1000,
     hu_max: float = 400,
-    device: str = "cuda"
+    device: str = "cuda",
+    smooth_boundary_width: int = 3
 ) -> Path:
     """
     将病灶融合到模板中
-    
+
     流程:
     1. 加载模板和病灶 mask
     2. 在 mask 区域挖空
     3. 使用 Inpainting 模型填充
-    4. 保存融合结果
-    
+    4. 边界平滑（可选）
+    5. 保存融合结果
+
     Args:
         template_path: 模板 CT 路径
         lesion_mask_path: 病灶 mask 路径 (已配准到模板空间)
@@ -83,7 +138,8 @@ def fuse_lesion(
         hu_min: 归一化最小 HU
         hu_max: 归一化最大 HU
         device: 计算设备
-        
+        smooth_boundary_width: 边界平滑宽度（0 表示不平滑）
+
     Returns:
         output_path: 融合后的 CT 路径
     """
@@ -146,20 +202,26 @@ def fuse_lesion(
     # 处理重叠区域 (平均)
     weight_volume[weight_volume == 0] = 1
     output_volume = output_volume / weight_volume
-    
+
     # 非 mask 区域保持原样
     output_volume[lesion_mask == 0] = template_norm[lesion_mask == 0]
-    
+
+    # 边界平滑
+    if smooth_boundary_width > 0:
+        output_volume = smooth_boundary(
+            output_volume, template_norm, lesion_mask, smooth_boundary_width
+        )
+
     # 反归一化
     output_hu = denormalize_ct(output_volume, hu_min, hu_max)
-    
+
     # 保存
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_nifti(output_hu, output_path, affine=affine)
-    
+
     logger.info(f"融合完成: {output_path}")
-    
+
     return output_path
 
 

@@ -170,18 +170,33 @@ class LungPatchDataset(Dataset):
         ct_patch: np.ndarray,
         mask_patch: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """数据增强"""
+        """
+        数据增强
+
+        包含：随机翻转、随机旋转、高斯噪声、强度缩放
+        """
         # 随机翻转
         for axis in range(3):
             if np.random.random() > 0.5:
                 ct_patch = np.flip(ct_patch, axis=axis)
                 mask_patch = np.flip(mask_patch, axis=axis)
-        
+
         # 随机旋转 (90度增量)
         k = np.random.randint(0, 4)
         ct_patch = np.rot90(ct_patch, k, axes=(1, 2))
         mask_patch = np.rot90(mask_patch, k, axes=(1, 2))
-        
+
+        # 高斯噪声 (30% 概率)
+        if np.random.random() < 0.3:
+            noise_std = np.random.uniform(0.01, 0.05)
+            noise = np.random.normal(0, noise_std, ct_patch.shape)
+            ct_patch = ct_patch + noise
+
+        # 强度缩放 (30% 概率)
+        if np.random.random() < 0.3:
+            scale = np.random.uniform(0.9, 1.1)
+            ct_patch = ct_patch * scale
+
         return ct_patch.copy(), mask_patch.copy()
     
     def __len__(self) -> int:

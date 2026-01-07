@@ -123,8 +123,16 @@ python run_phase2_pipeline.py
 # 强制覆盖:        python run_phase2_pipeline.py --force
 
 # Phase 3-4: 配准、融合与可视化
-python -m src.03_registration.register_lesions
-python -m src.04_texture_synthesis.train
+# Phase 3A: 空间映射（配准）
+python run_phase3_pipeline.py --limit 5
+
+# Phase 3B: AI 纹理融合训练
+python run_phase3b_training.py --no-gan --epochs 50
+
+# Phase 3B: 推理生成融合 CT
+python run_phase3b_inference.py
+
+# 可视化渲染
 python -m src.05_visualization.static_render
 ```
 

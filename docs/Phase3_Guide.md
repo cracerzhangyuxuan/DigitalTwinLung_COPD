@@ -102,15 +102,27 @@ graph TD
 
 | 项目 | 内容 |
 |------|------|
-| **对应脚本** | `src/04_texture_synthesis/train.py`, `network.py`, `losses.py` |
+| **对应脚本** | `run_phase3b_training.py`, `src/04_texture_synthesis/train.py` |
 | **预计耗时** | 7-14 天（含调参） |
 
 **模型架构选型**：
-1. **基线方案**：3D U-Net Inpainting（推荐首选）
+1. **基线方案**：3D U-Net Inpainting（推荐首选，已实现）
 2. **进阶方案**：3D Partial Convolution Network
 3. **高级方案**：3D Patch-GAN + Perceptual Loss
 
 **损失函数**：L1 Loss + Perceptual Loss + Adversarial Loss（可选）
+
+**快速开始**：
+```bash
+# 基础训练（仅 U-Net，无 GAN）
+python run_phase3b_training.py --no-gan --epochs 50
+
+# 完整训练（U-Net + GAN）
+python run_phase3b_training.py --epochs 100
+
+# 从检查点恢复
+python run_phase3b_training.py --resume checkpoints/latest.pth
+```
 
 ---
 
@@ -118,12 +130,24 @@ graph TD
 
 | 项目 | 内容 |
 |------|------|
-| **对应脚本** | `src/04_texture_synthesis/inference_fuse.py` |
-| **预计耗时** | 2-3 天 |
+| **对应脚本** | `run_phase3b_inference.py`, `src/04_texture_synthesis/inference_fuse.py` |
+| **预计耗时** | 每例约 1-2 分钟 |
 
-**推理流程**：挖空 → 分块推理 → 拼接 → 泊松融合
+**推理流程**：挖空 → 分块推理 → 拼接 → 边界平滑
 
-**输出**：`data/04_final_viz/fused_copd_twin.nii.gz`
+**快速开始**：
+```bash
+# 批量推理所有患者
+python run_phase3b_inference.py
+
+# 指定单个患者
+python run_phase3b_inference.py --patient copd_001
+
+# 使用指定检查点
+python run_phase3b_inference.py --checkpoint checkpoints/epoch_50.pth
+```
+
+**输出**：`data/04_final_viz/{patient_id}_fused.nii.gz`
 
 ---
 

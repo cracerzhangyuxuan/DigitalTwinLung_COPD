@@ -8,10 +8,14 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     2. 数据验证：检查 COPD 数据和标准底座完整性
     3. 空间映射：将 COPD 病灶配准到标准底座空间
     4. 可视化验证：生成映射结果对比图
-    5. [预留] AI 纹理融合：训练 Inpainting 模型
+    5. AI 纹理融合训练：训练 Inpainting 模型 (Phase 3B)
+    6. AI 纹理融合推理：生成融合后的数字孪生 CT
 
 使用方法：
-    # 完整流水线
+    # 完整流水线 (3A + 3B 训练 + 推理)
+    python run_phase3_pipeline.py --full
+
+    # 仅 Phase 3A（默认，空间映射 + 可视化）
     python run_phase3_pipeline.py
 
     # 快速测试（仅处理 3 例）
@@ -23,17 +27,20 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     # 仅执行可视化
     python run_phase3_pipeline.py --viz-only
 
+    # Phase 3B 训练
+    python run_phase3_pipeline.py --phase3b --model-type unet --epochs 50
+
+    # Phase 3B 推理
+    python run_phase3_pipeline.py --inference --checkpoint checkpoints/best.pth
+
     # 限制处理数量
     python run_phase3_pipeline.py --limit 5
 
-    # 后台运行
-    nohup python run_phase3_pipeline.py > logs/phase3.log 2>&1 &
-
 作者：DigitalTwinLung COPD Project
 日期：2025-12-30
+更新：2026-01-07 (添加 Phase 3B 支持)
 """
 
-import os
 import sys
 import argparse
 import importlib
@@ -41,11 +48,10 @@ import time
 import gc
 from pathlib import Path
 from datetime import datetime
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, Dict
 import logging
 
 import yaml
-import numpy as np
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent
@@ -153,7 +159,7 @@ def run_environment_check(logger: logging.Logger) -> bool:
 def run_data_validation(
     config: dict,
     logger: logging.Logger,
-    quick_test: bool = False
+    quick_test: bool = False  # noqa: ARG001 - 保留用于未来扩展
 ) -> Tuple[bool, Dict]:
     """验证数据完整性"""
     logger.info("")
@@ -484,7 +490,6 @@ def run_visualization(
 
     for i, patient_dir in enumerate(patient_dirs):
         patient_id = patient_dir.name
-        warped_ct = patient_dir / f"{patient_id}_warped.nii.gz"
         warped_lesion = patient_dir / f"{patient_id}_warped_lesion.nii.gz"
 
         logger.info(f"  [{i+1}/{len(patient_dirs)}] 渲染 {patient_id}...")
@@ -541,6 +546,231 @@ def run_visualization(
 
 
 # =============================================================================
+# Phase 3B: AI 纹理融合
+# =============================================================================
+
+def run_texture_training(
+    config: dict,
+    logger: logging.Logger,
+    model_type: str = 'unet',
+    epochs: int = None,
+    batch_size: int = None,
+    learning_rate: float = None
+) -> Tuple[bool, Dict]:
+    """
+    执行 Phase 3B AI 纹理融合训练
+
+    Args:
+        config: 配置字典
+        logger: 日志记录器
+        model_type: 模型类型 ('unet', 'partial_conv', 'patchgan')
+        epochs: 训练轮数（覆盖配置）
+        batch_size: 批次大小（覆盖配置）
+        learning_rate: 学习率（覆盖配置）
+
+    Returns:
+        Tuple[bool, Dict]: (是否成功, 训练结果)
+    """
+    logger.info("")
+    logger.info("[Step 5] AI 纹理融合训练 (Phase 3B)")
+    logger.info("-" * 40)
+
+    # 检查 PyTorch
+    torch_ok, torch_msg = check_pytorch()
+    if not torch_ok:
+        logger.error(f"  ✗ {torch_msg}")
+        logger.error("  请安装 PyTorch: pip install torch")
+        return False, {}
+    logger.info(f"  ✓ {torch_msg}")
+
+    # 检查 Phase 3A 输出
+    mapped_dir = Path(config['paths'].get('mapped', 'data/03_mapped'))
+    if not mapped_dir.exists():
+        logger.error(f"  ✗ 配准输出目录不存在: {mapped_dir}")
+        logger.error("  请先运行 Phase 3A")
+        return False, {}
+
+    # 统计已配准的数据
+    patient_count = 0
+    for patient_dir in mapped_dir.iterdir():
+        if not patient_dir.is_dir() or patient_dir.name == 'visualizations':
+            continue
+        warped_ct = patient_dir / f"{patient_dir.name}_warped.nii.gz"
+        warped_mask = patient_dir / f"{patient_dir.name}_warped_lesion.nii.gz"
+        if warped_ct.exists() and warped_mask.exists():
+            patient_count += 1
+
+    if patient_count == 0:
+        logger.error("  ✗ 未找到已配准的数据，请先运行 Phase 3A")
+        return False, {}
+
+    logger.info(f"  ✓ 已配准数据: {patient_count} 例")
+
+    # 更新配置
+    train_config = config.get('training', {})
+    if model_type:
+        train_config['model_type'] = model_type
+    if epochs:
+        train_config['epochs'] = epochs
+    if batch_size:
+        train_config['batch_size'] = batch_size
+    if learning_rate:
+        train_config['learning_rate'] = learning_rate
+    config['training'] = train_config
+
+    # 显示模型类型
+    model_names = {
+        'unet': '基线方案 (3D U-Net)',
+        'partial_conv': '进阶方案 (Partial Conv)',
+        'patchgan': '高级方案 (PatchGAN)'
+    }
+    logger.info(f"  模型类型: {model_names.get(model_type, model_type)}")
+    logger.info(f"  训练轮数: {train_config.get('epochs', 100)}")
+    logger.info(f"  批次大小: {train_config.get('batch_size', 4)}")
+
+    # 导入训练模块
+    logger.info("")
+    logger.info("  初始化训练...")
+
+    try:
+        train_module = importlib.import_module("src.04_texture_synthesis.train")
+        train_module.main(config)
+
+        logger.info("")
+        logger.info("  ✓ 训练完成!")
+
+        checkpoint_dir = Path(config['paths'].get('checkpoints', 'checkpoints'))
+        return True, {
+            'checkpoint_dir': str(checkpoint_dir),
+            'best_model': str(checkpoint_dir / 'best.pth'),
+            'model_type': model_type
+        }
+
+    except KeyboardInterrupt:
+        logger.warning("  训练被用户中断")
+        return False, {}
+    except Exception as e:
+        logger.error(f"  ✗ 训练失败: {e}")
+        return False, {'error': str(e)}
+
+
+def run_texture_inference(
+    config: dict,
+    logger: logging.Logger,
+    checkpoint_path: str = None,
+    patient_id: str = None,
+    device: str = 'cuda',
+    smooth_boundary: bool = True
+) -> Tuple[bool, Dict]:
+    """
+    执行 Phase 3B AI 纹理融合推理
+
+    Args:
+        config: 配置字典
+        logger: 日志记录器
+        checkpoint_path: 模型检查点路径
+        patient_id: 指定患者 ID（默认处理所有）
+        device: 计算设备
+        smooth_boundary: 是否平滑边界
+
+    Returns:
+        Tuple[bool, Dict]: (是否成功, 推理结果)
+    """
+    logger.info("")
+    logger.info("[Step 6] AI 纹理融合推理 (Phase 3B)")
+    logger.info("-" * 40)
+
+    paths = config.get('paths', {})
+
+    # 确定路径
+    template_path = Path(paths.get('atlas', 'data/02_atlas')) / 'standard_template.nii.gz'
+    mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
+    output_dir = Path(paths.get('final_viz', 'data/04_final_viz'))
+
+    if checkpoint_path:
+        checkpoint = Path(checkpoint_path)
+    else:
+        checkpoint = Path(paths.get('checkpoints', 'checkpoints')) / 'best.pth'
+
+    # 检查文件
+    if not checkpoint.exists():
+        logger.error(f"  ✗ 模型检查点不存在: {checkpoint}")
+        logger.error("  请先运行 Phase 3B 训练: --phase3b")
+        return False, {}
+
+    if not template_path.exists():
+        logger.error(f"  ✗ 模板文件不存在: {template_path}")
+        return False, {}
+
+    logger.info(f"  模板: {template_path}")
+    logger.info(f"  检查点: {checkpoint}")
+    logger.info(f"  输出目录: {output_dir}")
+
+    # 导入推理模块
+    try:
+        inference_module = importlib.import_module("src.04_texture_synthesis.inference_fuse")
+    except ImportError as e:
+        logger.error(f"  ✗ 导入推理模块失败: {e}")
+        return False, {}
+
+    # 加载模型
+    logger.info("  加载模型...")
+    try:
+        model = inference_module.load_model(checkpoint, device=device)
+    except Exception as e:
+        logger.error(f"  ✗ 加载模型失败: {e}")
+        return False, {}
+
+    # 查找待处理的患者
+    if patient_id:
+        patient_dirs = [mapped_dir / patient_id]
+    else:
+        patient_dirs = [d for d in sorted(mapped_dir.iterdir())
+                       if d.is_dir() and d.name != 'visualizations']
+
+    logger.info(f"  待处理: {len(patient_dirs)} 例")
+
+    # 处理每个患者
+    output_dir.mkdir(parents=True, exist_ok=True)
+    success_count = 0
+    results = {'outputs': [], 'failed': []}
+
+    for i, patient_dir in enumerate(patient_dirs):
+        pid = patient_dir.name
+        mask_path = patient_dir / f"{pid}_warped_lesion.nii.gz"
+
+        if not mask_path.exists():
+            logger.warning(f"  [{i+1}/{len(patient_dirs)}] 跳过 {pid}: mask 不存在")
+            results['failed'].append(pid)
+            continue
+
+        logger.info(f"  [{i+1}/{len(patient_dirs)}] 处理 {pid}...")
+
+        try:
+            output_path = output_dir / f"{pid}_fused.nii.gz"
+            inference_module.fuse_lesion(
+                template_path=template_path,
+                lesion_mask_path=mask_path,
+                model=model,
+                output_path=output_path,
+                device=device,
+                smooth_boundary_width=3 if smooth_boundary else 0
+            )
+            logger.info(f"    ✓ 完成: {output_path.name}")
+            success_count += 1
+            results['outputs'].append(str(output_path))
+        except Exception as e:
+            logger.error(f"    ✗ 失败: {e}")
+            results['failed'].append(pid)
+
+    logger.info("")
+    logger.info(f"  推理完成: {success_count}/{len(patient_dirs)} 成功")
+    logger.info(f"  输出目录: {output_dir}")
+
+    return success_count > 0, results
+
+
+# =============================================================================
 # 主函数
 # =============================================================================
 
@@ -550,23 +780,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  # 完整流水线
+  # 完整流水线 (3A + 3B)
+  python run_phase3_pipeline.py --full
+
+  # 仅 Phase 3A（默认）
   python run_phase3_pipeline.py
 
   # 快速测试（仅处理 3 例）
   python run_phase3_pipeline.py --quick-test
+
+  # Phase 3B 训练
+  python run_phase3_pipeline.py --phase3b --model-type unet --epochs 50
+
+  # Phase 3B 推理
+  python run_phase3_pipeline.py --inference --checkpoint checkpoints/best.pth
 
   # 跳过配准（使用已有结果）
   python run_phase3_pipeline.py --skip-registration
 
   # 仅执行可视化
   python run_phase3_pipeline.py --viz-only
-
-  # 限制处理数量
-  python run_phase3_pipeline.py --limit 5
-
-  # 后台运行
-  nohup python run_phase3_pipeline.py > logs/phase3.log 2>&1 &
         """
     )
 
@@ -580,6 +813,49 @@ def main():
         '--viz-only', action='store_true',
         help='仅执行可视化（需要已有映射结果）'
     )
+    step_group.add_argument(
+        '--phase3b', '--train', action='store_true',
+        help='执行 Phase 3B 训练'
+    )
+    step_group.add_argument(
+        '--inference', action='store_true',
+        help='执行 Phase 3B 推理'
+    )
+    step_group.add_argument(
+        '--full', action='store_true',
+        help='完整流水线 (3A + 3B 训练 + 推理)'
+    )
+
+    # Phase 3B 参数
+    parser.add_argument(
+        '--model-type', type=str, default='unet',
+        choices=['unet', 'partial_conv', 'patchgan'],
+        help='模型类型: unet(基线), partial_conv(进阶), patchgan(高级)'
+    )
+    parser.add_argument(
+        '--epochs', type=int, default=None,
+        help='训练轮数（覆盖配置文件）'
+    )
+    parser.add_argument(
+        '--batch-size', type=int, default=None,
+        help='批次大小（覆盖配置文件）'
+    )
+    parser.add_argument(
+        '--lr', type=float, default=None,
+        help='学习率（覆盖配置文件）'
+    )
+    parser.add_argument(
+        '--checkpoint', type=str, default=None,
+        help='推理使用的模型检查点路径'
+    )
+    parser.add_argument(
+        '--patient', type=str, default=None,
+        help='指定患者 ID（推理时使用）'
+    )
+    parser.add_argument(
+        '--device', type=str, default='cuda',
+        help='计算设备 (cuda/cpu)'
+    )
 
     # 其他参数
     parser.add_argument(
@@ -591,20 +867,8 @@ def main():
         help='限制处理数量'
     )
     parser.add_argument(
-        '--input-dir', type=str, default=None,
-        help='COPD CT 目录（默认: data/01_cleaned/copd_clean/）'
-    )
-    parser.add_argument(
-        '--lesion-dir', type=str, default=None,
-        help='病灶 Mask 目录（默认: data/01_cleaned/copd_emphysema/）'
-    )
-    parser.add_argument(
         '--output-dir', type=str, default=None,
         help='输出目录（默认: data/03_mapped/）'
-    )
-    parser.add_argument(
-        '--atlas-template', type=str, default=None,
-        help='标准底座路径（默认: data/02_atlas/standard_template.nii.gz）'
     )
     parser.add_argument(
         '--check-only', action='store_true',
@@ -671,7 +935,57 @@ def main():
         sys.exit(0)
 
     # =========================================================================
-    # 正常流水线
+    # --phase3b 模式 (仅训练)
+    # =========================================================================
+    if args.phase3b:
+        logger.info("")
+        logger.info("模式: Phase 3B 训练 (--phase3b)")
+
+        train_ok, train_results = run_texture_training(
+            config, logger,
+            model_type=args.model_type,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr
+        )
+
+        elapsed = time.time() - pipeline_start
+        logger.info("")
+        logger.info("=" * 60)
+        if train_ok:
+            logger.info(f"Phase 3B 训练完成，耗时: {elapsed/60:.1f} 分钟")
+            logger.info(f"模型保存: {train_results.get('best_model', 'checkpoints/best.pth')}")
+        else:
+            logger.error("Phase 3B 训练失败")
+        logger.info("=" * 60)
+        sys.exit(0 if train_ok else 1)
+
+    # =========================================================================
+    # --inference 模式 (仅推理)
+    # =========================================================================
+    if args.inference:
+        logger.info("")
+        logger.info("模式: Phase 3B 推理 (--inference)")
+
+        infer_ok, _ = run_texture_inference(
+            config, logger,
+            checkpoint_path=args.checkpoint,
+            patient_id=args.patient,
+            device=args.device
+        )
+
+        elapsed = time.time() - pipeline_start
+        logger.info("")
+        logger.info("=" * 60)
+        if infer_ok:
+            logger.info(f"Phase 3B 推理完成，耗时: {elapsed:.1f} 秒")
+        else:
+            logger.error("Phase 3B 推理失败")
+        logger.info("=" * 60)
+        sys.exit(0 if infer_ok else 1)
+
+    # =========================================================================
+    # 正常流水线 (Phase 3A) 或完整流水线 (--full)
     # =========================================================================
 
     # Step 1: 环境检查
@@ -685,7 +999,7 @@ def main():
         sys.exit(0 if env_ok else 1)
 
     # Step 2: 数据验证
-    data_ok, data_stats = run_data_validation(config, logger, args.quick_test)
+    data_ok, _ = run_data_validation(config, logger, args.quick_test)
     if not data_ok:
         logger.error("")
         logger.error("数据验证失败，退出")
@@ -698,7 +1012,7 @@ def main():
 
     # Step 3: 空间映射
     if not args.skip_registration:
-        mapping_ok, mapping_results = run_spatial_mapping(
+        mapping_ok, _ = run_spatial_mapping(
             config, logger,
             quick_test=args.quick_test,
             limit=args.limit
@@ -714,12 +1028,41 @@ def main():
     run_visualization(config, logger, limit=args.limit)
 
     # =========================================================================
+    # Phase 3B (如果 --full 模式)
+    # =========================================================================
+    if args.full:
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("  继续执行 Phase 3B: AI 纹理融合")
+        logger.info("=" * 60)
+
+        # Step 5: 训练
+        train_ok, _ = run_texture_training(
+            config, logger,
+            model_type=args.model_type,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr
+        )
+
+        if train_ok:
+            # Step 6: 推理
+            run_texture_inference(
+                config, logger,
+                checkpoint_path=args.checkpoint,
+                device=args.device
+            )
+
+    # =========================================================================
     # 总结
     # =========================================================================
     pipeline_elapsed = time.time() - pipeline_start
     logger.info("")
     logger.info("=" * 60)
-    logger.info("Phase 3A 流水线执行完成")
+    if args.full:
+        logger.info("Phase 3 完整流水线执行完成")
+    else:
+        logger.info("Phase 3A 流水线执行完成")
     logger.info("=" * 60)
     logger.info(f"总耗时: {pipeline_elapsed/60:.1f} 分钟")
     logger.info(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -727,19 +1070,24 @@ def main():
     # 输出结果摘要
     logger.info("")
     logger.info("输出目录:")
-    logger.info(f"  {output_dir}")
+    logger.info(f"  映射结果: {output_dir}")
+
+    final_viz_dir = Path(config['paths'].get('final_viz', 'data/04_final_viz'))
+    if final_viz_dir.exists() and any(final_viz_dir.glob("*.nii.gz")):
+        logger.info(f"  融合结果: {final_viz_dir}")
 
     # 统计结果
     patient_dirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name != 'visualizations']
     logger.info(f"  已处理患者: {len(patient_dirs)} 例")
 
-    logger.info("")
-    logger.info("下一步:")
-    logger.info("  1. 检查 data/03_mapped/ 中的映射结果")
-    logger.info("  2. 使用 3D Slicer 验证病灶位置是否正确")
-    logger.info("  3. 准备 Phase 3B: AI 纹理融合训练")
-    logger.info("     - 编写 src/04_texture_synthesis/dataset.py")
-    logger.info("     - 编写 src/04_texture_synthesis/train.py")
+    if not args.full:
+        logger.info("")
+        logger.info("下一步:")
+        logger.info("  1. 检查 data/03_mapped/ 中的映射结果")
+        logger.info("  2. 运行 Phase 3B 训练:")
+        logger.info("     python run_phase3_pipeline.py --phase3b --model-type unet")
+        logger.info("  3. 运行 Phase 3B 推理:")
+        logger.info("     python run_phase3_pipeline.py --inference")
 
 
 if __name__ == "__main__":

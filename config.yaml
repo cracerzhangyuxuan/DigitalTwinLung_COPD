@@ -175,29 +175,43 @@ registration:
 
 # ----- 训练参数 -----
 training:
+  # 模型架构选择
+  # - "unet": 基线方案 - 3D U-Net Inpainting（推荐首选）
+  # - "partial_conv": 进阶方案 - 3D Partial Convolution（处理不规则 Mask 更优）
+  # - "patchgan": 高级方案 - U-Net + PatchGAN（效果最佳，训练复杂）
+  model_type: "unet"
+
   # 数据加载
   batch_size: 4
   num_workers: 4
   patch_size: [64, 64, 64]
-  
+
   # 优化器
   optimizer: "Adam"
   learning_rate: 0.0002
   beta1: 0.5
   beta2: 0.999
   weight_decay: 0.0001
-  
+
+  # 学习率调度
+  lr_scheduler: "cosine"  # "step", "cosine", "warmup_cosine"
+  warmup_epochs: 5        # warmup 轮数（仅 warmup_cosine 使用）
+
   # 损失函数权重
   loss_weights:
     reconstruction: 1.0
     perceptual: 0.1
     adversarial: 0.01
-  
+
   # 训练控制
   epochs: 100
   save_frequency: 10
   validate_frequency: 5
   early_stopping_patience: 20
+
+  # TensorBoard 日志
+  tensorboard: true
+  log_dir: "logs/tensorboard"
 
 # ----- 评估参数 -----
 evaluation:
