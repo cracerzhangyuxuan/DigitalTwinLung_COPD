@@ -149,6 +149,12 @@ pytest tests/ -v
 - `standard_trachea_mask.nii.gz` - 气管树模板 mask（66,412 体素）
 - `standard_lung_lobes_labeled.nii.gz` - 5 肺叶标签
 
+**数字肺底座（2026-01-07 新增）：**
+- `digital_lung_labels.nii.gz` - 融合标签文件（肺叶 1-5 + 气管树 6）
+- `digital_lung_base.json` - 元数据文件
+
+> **注**: 数字肺底座将分散的肺叶和气管树文件合并为单一融合标签，简化 Phase 3A 流程。详见 [`docs/digital_lung_base.md`](docs/digital_lung_base.md)
+
 ## 📖 文档
 
 - [工程实施指南](Engineering_Edition.md)

@@ -6,6 +6,7 @@
 使用 ANTsPy SyN 算法将 COPD 患者的病灶 mask 配准到标准模板空间
 """
 
+import gc
 from pathlib import Path
 from typing import Union, Tuple, List, Optional, Dict
 
@@ -98,15 +99,24 @@ def register_to_template(
     outputs['warped_image'] = warped_path
     
     # 保存变换矩阵
+    import shutil
     for i, transform in enumerate(registration['fwdtransforms']):
-        transform_path = output_dir / f"{patient_id}_transform_{i}{Path(transform).suffix}"
+        # 修复后缀问题：Path.suffix 只返回最后一个后缀（.gz），
+        # 对于 .nii.gz 文件需要使用 suffixes 获取完整后缀
+        transform_src = Path(transform)
+        suffixes = ''.join(transform_src.suffixes)  # 例如 ".nii.gz" 或 ".mat"
+        transform_path = output_dir / f"{patient_id}_transform_{i}{suffixes}"
         # 复制变换文件
-        import shutil
         shutil.copy(transform, transform_path)
         outputs[f'transform_{i}'] = transform_path
+        logger.debug(f"  保存变换文件: {transform_path.name}")
     
     logger.info(f"配准完成: {patient_id}")
-    
+
+    # 显式释放内存
+    del moving, fixed, registration
+    gc.collect()
+
     return outputs
 
 
@@ -143,21 +153,48 @@ def warp_mask(
 
     logger.info(f"扭曲 mask: {mask_path.name}")
 
+    # 验证变换文件
+    if not transform_paths:
+        raise ValueError("变换文件列表为空！请检查 register_to_template() 的输出")
+
+    valid_transforms = []
+    for tp in transform_paths:
+        tp_path = Path(tp)
+        if tp_path.exists():
+            valid_transforms.append(str(tp_path))
+            logger.debug(f"  变换文件: {tp_path.name}")
+        else:
+            logger.warning(f"  变换文件不存在: {tp_path}")
+
+    if not valid_transforms:
+        raise ValueError(f"所有变换文件都不存在！路径: {transform_paths}")
+
     # 加载
     mask = ants.image_read(str(mask_path))
     template = ants.image_read(str(template_path))
+
+    logger.info(f"  原始 mask 形状: {mask.shape}")
+    logger.info(f"  目标模板形状: {template.shape}")
 
     # 记录原始体素数
     original_voxels = int(np.sum(mask.numpy() > 0))
     logger.info(f"  原始 mask 体素数: {original_voxels}")
 
     # 应用变换（mask 必须使用最近邻插值！）
+    logger.info(f"  应用 {len(valid_transforms)} 个变换...")
     warped_mask = ants.apply_transforms(
         fixed=template,
         moving=mask,
-        transformlist=[str(p) for p in transform_paths],
+        transformlist=valid_transforms,
         interpolator=interpolation  # 默认 nearestNeighbor
     )
+
+    # 验证变形结果的形状
+    logger.info(f"  变形后形状: {warped_mask.shape}")
+    if warped_mask.shape != template.shape:
+        logger.warning(
+            f"  ⚠️ 变形后形状 {warped_mask.shape} 与模板形状 {template.shape} 不匹配！"
+        )
 
     # 二值化 (处理插值可能产生的非整数值)
     warped_array = warped_mask.numpy()
@@ -173,17 +210,25 @@ def warp_mask(
             template_mask = ants.image_read(str(template_mask_path))
             template_mask_array = (template_mask.numpy() > 0).astype(np.uint8)
 
-            # 约束：病灶必须在模板肺内
-            before_constrain = np.sum(warped_array)
-            warped_array = warped_array & template_mask_array
-            after_constrain = np.sum(warped_array)
-
-            if before_constrain > after_constrain:
-                removed = before_constrain - after_constrain
-                logger.info(
-                    f"  模板 mask 约束: 移除 {removed} 个肺外体素 "
-                    f"({removed/max(before_constrain,1)*100:.1f}%)"
+            # 检查维度是否匹配
+            if warped_array.shape != template_mask_array.shape:
+                logger.warning(
+                    f"  维度不匹配! warped: {warped_array.shape}, "
+                    f"template_mask: {template_mask_array.shape}"
                 )
+                logger.warning("  跳过模板 mask 约束（需要修复 standard_mask.nii.gz）")
+            else:
+                # 约束：病灶必须在模板肺内
+                before_constrain = np.sum(warped_array)
+                warped_array = warped_array & template_mask_array
+                after_constrain = np.sum(warped_array)
+
+                if before_constrain > after_constrain:
+                    removed = before_constrain - after_constrain
+                    logger.info(
+                        f"  模板 mask 约束: 移除 {removed} 个肺外体素 "
+                        f"({removed/max(before_constrain,1)*100:.1f}%)"
+                    )
         else:
             logger.warning(f"  模板 mask 不存在: {template_mask_path}")
 

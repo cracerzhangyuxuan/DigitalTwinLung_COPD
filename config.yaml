@@ -154,12 +154,24 @@ registration:
       rho: 0.01        # 岭惩罚，增加鲁棒性
       r_search: 3      # 搜索半径
 
+  # 气管树融合参数（2025-12-31 新增）
+  airway_fusion:
+    enabled: true                    # 是否启用气管树融合
+    airway_hu: -995.0                # 气道 HU 值（真实气道约 -1000 到 -950）
+    boundary_sigma: 0.8              # 边界平滑高斯 sigma
+    boundary_width: 2                # 边界羽化宽度（体素数）
+    preserve_existing_low_hu: true   # 保留模板中已有的低 HU 区域
+    # 输出文件名
+    output_filename: "standard_template_with_airway.nii.gz"
+
   # 病灶配准
   lesion_registration:
     type_of_transform: "SyNRA"
     reg_iterations: [100, 70, 50, 20]
     shrink_factors: [8, 4, 2, 1]
     smoothing_sigmas: [3, 2, 1, 0]
+    # 使用融合后的模板（包含气管树）（2025-12-31 新增）
+    use_airway_template: true        # 设为 true 使用包含气管树的模板
 
 # ----- 训练参数 -----
 training:

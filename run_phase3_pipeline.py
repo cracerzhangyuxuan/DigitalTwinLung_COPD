@@ -38,6 +38,7 @@ import sys
 import argparse
 import importlib
 import time
+import gc
 from pathlib import Path
 from datetime import datetime
 from typing import Tuple, List, Dict, Optional
@@ -222,7 +223,29 @@ def run_spatial_mapping(
     cleaned_dir = Path(config['paths']['cleaned_data'])
     output_dir = Path(config['paths'].get('mapped', 'data/03_mapped'))
 
-    template_path = atlas_dir / 'standard_template.nii.gz'
+    # 选择模板：优先使用包含气管树的完整模板
+    reg_config = config.get('registration', {}).get('lesion_registration', {})
+    airway_fusion_config = config.get('registration', {}).get('airway_fusion', {})
+
+    use_airway_template = reg_config.get('use_airway_template', True)
+    airway_template_filename = airway_fusion_config.get(
+        'output_filename', 'standard_template_with_airway.nii.gz'
+    )
+    airway_template_path = atlas_dir / airway_template_filename
+    original_template_path = atlas_dir / 'standard_template.nii.gz'
+
+    # 如果启用气管树模板且文件存在，则使用它
+    if use_airway_template and airway_template_path.exists():
+        template_path = airway_template_path
+        logger.info(f"  使用完整模板（含气管树）: {template_path.name}")
+    else:
+        template_path = original_template_path
+        if use_airway_template and not airway_template_path.exists():
+            logger.warning(f"  气管树模板不存在: {airway_template_path}")
+            logger.warning("  回退到原始模板。请先运行:")
+            logger.warning("    python -m src.02_atlas_build.fuse_airway_to_template")
+        logger.info(f"  使用原始模板: {template_path.name}")
+
     template_mask_path = atlas_dir / 'standard_mask.nii.gz'
     copd_ct_dir = cleaned_dir / 'copd_clean'
     copd_lesion_dir = cleaned_dir / 'copd_emphysema'
@@ -250,8 +273,7 @@ def run_spatial_mapping(
         logger.error(f"  导入配准模块失败: {e}")
         return False, {'processed': 0, 'failed': 0}
 
-    # 获取配准配置
-    reg_config = config.get('registration', {}).get('lesion_registration', {})
+    # 注意: reg_config 已在上方获取，无需重复获取
 
     results = {'processed': 0, 'failed': 0, 'details': []}
 
@@ -319,6 +341,10 @@ def run_spatial_mapping(
             logger.error(f"    ✗ 失败: {e}")
             results['failed'] += 1
 
+        # 【关键修复】显式释放内存，防止内存累积导致后续配准失败
+        gc.collect()
+        logger.debug(f"    内存已清理")
+
     logger.info("")
     logger.info(f"  配准完成: {results['processed']}/{len(copd_cts)} 成功")
     if results['failed'] > 0:
@@ -332,17 +358,94 @@ def run_visualization(
     logger: logging.Logger,
     limit: int = None
 ) -> bool:
-    """生成映射结果可视化"""
+    """
+    生成映射结果可视化
+
+    为每个患者生成三视图渲染图（X/Y/Z 三个轴向）：
+    - 显示变形后的病灶 mask 叠加在标准模板上
+    - 输出 PNG 图片到 data/03_mapped/visualizations/ 目录
+
+    Args:
+        config: 配置字典
+        logger: 日志记录器
+        limit: 限制可视化数量（默认无限制）
+
+    Returns:
+        bool: 是否成功生成可视化
+    """
     logger.info("")
     logger.info("[Step 4] 可视化验证")
     logger.info("-" * 40)
 
     output_dir = Path(config['paths'].get('mapped', 'data/03_mapped'))
+    atlas_dir = Path(config['paths'].get('atlas', 'data/02_atlas'))
     viz_dir = output_dir / 'visualizations'
     viz_dir.mkdir(parents=True, exist_ok=True)
 
+    # 标准模板路径
+    template_path = atlas_dir / 'standard_template.nii.gz'
+    template_mask_path = atlas_dir / 'standard_mask.nii.gz'
+
+    # 数字肺底座文件（融合标签）
+    digital_lung_labels_path = atlas_dir / 'digital_lung_labels.nii.gz'
+    digital_lung_meta_path = atlas_dir / 'digital_lung_base.json'
+
+    # 分散文件（向后兼容）
+    template_lobes_path = atlas_dir / 'standard_lung_lobes_labeled.nii.gz'
+    template_trachea_path = atlas_dir / 'standard_trachea_mask.nii.gz'
+
+    if not template_path.exists():
+        logger.warning(f"  模板文件不存在: {template_path}")
+        return False
+
+    # 检查数字肺底座是否存在，如果不存在则尝试构建
+    use_digital_base = False
+    if digital_lung_labels_path.exists() and digital_lung_meta_path.exists():
+        use_digital_base = True
+        logger.info(f"  数字肺底座: {digital_lung_labels_path.name} (融合标签)")
+    else:
+        # 尝试构建数字肺底座
+        try:
+            build_module = importlib.import_module("src.02_atlas_build.build_digital_lung_base")
+            logger.info("  数字肺底座不存在，尝试构建...")
+            success, info = build_module.build_digital_lung_base(atlas_dir)
+            if success:
+                use_digital_base = True
+                logger.info(f"  数字肺底座: 构建成功")
+            else:
+                logger.warning(f"  数字肺底座构建失败: {info}")
+        except Exception as e:
+            logger.warning(f"  无法构建数字肺底座: {e}")
+
+    # 检查肺叶和气管树（从数字肺底座或分散文件）
+    if use_digital_base:
+        has_lobes = True
+        has_trachea = True
+        # 从融合标签中提取（在渲染时处理）
+        lobes_to_render = str(digital_lung_labels_path)
+        trachea_to_render = str(digital_lung_labels_path)
+        logger.info(f"  肺叶标签: 从数字肺底座提取 (5 肺叶着色)")
+        logger.info(f"  气管树: 从数字肺底座提取 (橙色渲染)")
+    else:
+        # 向后兼容：使用分散文件
+        has_lobes = template_lobes_path.exists()
+        has_trachea = template_trachea_path.exists()
+        lobes_to_render = str(template_lobes_path) if has_lobes else None
+        trachea_to_render = str(template_trachea_path) if has_trachea else None
+
+        if has_lobes:
+            logger.info(f"  肺叶标签: {template_lobes_path.name} (5 肺叶着色)")
+        else:
+            logger.info(f"  肺叶标签: 无 (使用二值 mask)")
+
+        if has_trachea:
+            logger.info(f"  气管树: {template_trachea_path.name} (橙色渲染)")
+        else:
+            logger.info(f"  气管树: 无")
+
     # 查找已处理的患者
     patient_dirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name != 'visualizations']
+    patient_dirs = sorted(patient_dirs)
 
     if limit:
         patient_dirs = patient_dirs[:limit]
@@ -352,17 +455,20 @@ def run_visualization(
         return False
 
     logger.info(f"  待可视化: {len(patient_dirs)} 例")
+    logger.info(f"  标准模板: {template_path}")
+    logger.info(f"  输出目录: {viz_dir}")
 
     # 尝试导入可视化模块
     try:
         viz_module = importlib.import_module("src.05_visualization.static_render")
         has_viz = True
-    except ImportError:
-        logger.warning("  无法导入可视化模块，跳过可视化")
+    except ImportError as e:
+        logger.warning(f"  无法导入可视化模块: {e}")
+        logger.warning("  跳过可视化（请安装: pip install pyvista）")
         has_viz = False
 
-    if has_viz:
-        # 简单的统计输出
+    if not has_viz:
+        # 只打印统计信息
         for patient_dir in patient_dirs:
             patient_id = patient_dir.name
             warped_lesion = patient_dir / f"{patient_id}_warped_lesion.nii.gz"
@@ -370,11 +476,68 @@ def run_visualization(
                 logger.info(f"  ✓ {patient_id}: {warped_lesion.name}")
             else:
                 logger.warning(f"  ⚠ {patient_id}: 缺少 warped_lesion")
+        return True
+
+    # 执行可视化渲染
+    success_count = 0
+    fail_count = 0
+
+    for i, patient_dir in enumerate(patient_dirs):
+        patient_id = patient_dir.name
+        warped_ct = patient_dir / f"{patient_id}_warped.nii.gz"
+        warped_lesion = patient_dir / f"{patient_id}_warped_lesion.nii.gz"
+
+        logger.info(f"  [{i+1}/{len(patient_dirs)}] 渲染 {patient_id}...")
+
+        if not warped_lesion.exists():
+            logger.warning(f"    ⚠ 缺少 warped_lesion，跳过")
+            fail_count += 1
+            continue
+
+        try:
+            # 使用 render_multiview 生成三视图渲染
+            # 使用标准模板作为背景（因为 warped_ct 可能缺少气管树）
+            ct_to_render = str(template_path)  # 使用模板作为背景
+            lesion_to_render = str(warped_lesion)
+            mask_to_render = str(template_mask_path) if template_mask_path.exists() else None
+            # lobes_to_render 和 trachea_to_render 已在前面根据数字肺底座或分散文件设置
+
+            result = viz_module.render_multiview(
+                ct_path=ct_to_render,
+                lesion_mask_path=lesion_to_render,
+                lung_mask_path=mask_to_render,
+                output_prefix=patient_id,
+                output_dir=str(viz_dir),
+                lung_opacity=0.25,  # 肺叶透明度
+                lesion_opacity=0.9,  # 病灶不透明
+                window_size=(800, 800),
+                use_mask_surface=True,
+                auto_threshold=True,
+                lobes_mask_path=lobes_to_render,  # 5 肺叶着色
+                trachea_mask_path=trachea_to_render,  # 气管树
+                trachea_color=(0.8, 0.4, 0.2),  # 橙色
+                trachea_opacity=0.9,  # 不透明
+                use_digital_base=use_digital_base  # 是否使用数字肺底座
+            )
+
+            if result:
+                logger.info(f"    ✓ 生成: {patient_id}_view_*.png")
+                success_count += 1
+            else:
+                logger.warning(f"    ⚠ 渲染失败")
+                fail_count += 1
+
+        except Exception as e:
+            logger.error(f"    ✗ 渲染异常: {e}")
+            fail_count += 1
 
     logger.info("")
-    logger.info(f"  可视化目录: {viz_dir}")
+    logger.info(f"  可视化完成: {success_count}/{len(patient_dirs)} 成功")
+    if fail_count > 0:
+        logger.warning(f"  失败: {fail_count} 例")
+    logger.info(f"  输出目录: {viz_dir}")
 
-    return True
+    return success_count > 0
 
 
 # =============================================================================

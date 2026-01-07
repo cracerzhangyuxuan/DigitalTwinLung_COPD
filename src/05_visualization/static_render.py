@@ -448,12 +448,20 @@ def render_multiview(
     lung_threshold: float = -500,
     window_size: Tuple[int, int] = (1920, 1080),
     use_mask_surface: bool = True,
-    auto_threshold: bool = True
+    auto_threshold: bool = True,
+    lobes_mask_path: Optional[Union[str, Path]] = None,
+    trachea_mask_path: Optional[Union[str, Path]] = None,
+    trachea_color: Tuple[float, float, float] = (0.8, 0.4, 0.2),
+    trachea_opacity: float = 0.9,
+    use_digital_base: bool = False
 ) -> bool:
     """
     生成 X/Y/Z 三个视角的渲染图
 
     此函数从 generate_multiview_comparison.py 整合而来，提供多视角渲染能力。
+    支持 5 肺叶着色渲染（如果提供 lobes_mask_path）。
+    支持气管树渲染（如果提供 trachea_mask_path）。
+    支持从数字肺底座融合标签文件中提取肺叶和气管树。
 
     Args:
         ct_path: CT 文件路径
@@ -461,7 +469,7 @@ def render_multiview(
         lung_mask_path: 肺部 mask 路径
         output_prefix: 输出文件前缀
         output_dir: 输出目录
-        lung_color: 肺部颜色 RGB
+        lung_color: 肺部颜色 RGB（无肺叶标签时使用）
         lesion_color: 病灶颜色 RGB
         lung_opacity: 肺部透明度 (0-1)
         lesion_opacity: 病灶透明度 (0-1)
@@ -469,18 +477,14 @@ def render_multiview(
         window_size: 窗口大小
         use_mask_surface: 是否使用 mask 表面渲染（更清晰的边界）
         auto_threshold: 是否自动计算最佳阈值（基于肺内 HU 分布）
+        lobes_mask_path: 肺叶标签 mask 路径（可选）
+        trachea_mask_path: 气管树 mask 路径（可选）
+        trachea_color: 气管树颜色 RGB（默认橙色）
+        trachea_opacity: 气管树透明度 (0-1)
+        use_digital_base: 是否使用数字肺底座（lobes和trachea指向同一融合文件）
 
     Returns:
         success: 是否成功
-
-    Example:
-        >>> render_multiview(
-        ...     ct_path="data/01_cleaned/copd_clean/copd_001_clean.nii.gz",
-        ...     lesion_mask_path="data/01_cleaned/copd_emphysema/copd_001_emphysema.nii.gz",
-        ...     lung_mask_path="data/01_cleaned/copd_mask/copd_001_mask.nii.gz",
-        ...     output_prefix="copd_001",
-        ...     output_dir="data/04_final_viz"
-        ... )
     """
     if not check_pyvista_available():
         return False
@@ -510,8 +514,8 @@ def render_multiview(
     lung_mask = (lung_mask > 0).astype(np.uint8)
     lesion_mask = (lesion_mask > 0).astype(np.uint8)
 
-    # 清理肺 mask，只保留最大的 1 个连通分量
-    lung_mask = clean_lung_mask(lung_mask, keep_largest_n=1)
+    # 清理肺 mask，保留最大的 2 个连通分量（左右肺）
+    lung_mask = clean_lung_mask(lung_mask, keep_largest_n=2)
 
     # 约束病灶在肺内
     lesion_mask = lesion_mask & lung_mask
@@ -531,25 +535,82 @@ def render_multiview(
     # 创建网格
     spacing = (1.0, 1.0, 1.0)
 
-    if use_mask_surface:
-        # 使用 lung_mask 直接创建表面
-        lung_grid = pv.ImageData()
-        lung_grid.dimensions = lung_mask.shape
-        lung_grid.spacing = spacing
-        lung_grid.point_data["values"] = lung_mask.astype(float).flatten(order="F")
-        lung_mesh = lung_grid.contour([0.5], scalars="values")
-        if lung_mesh.n_points > 0:
-            lung_mesh = lung_mesh.smooth(n_iter=30, relaxation_factor=0.05)
-    else:
-        lung_grid = pv.ImageData()
-        lung_grid.dimensions = ct_data_masked.shape
-        lung_grid.spacing = spacing
-        lung_grid.point_data["values"] = ct_data_masked.flatten(order="F")
-        lung_mesh = lung_grid.contour([lung_threshold], scalars="values")
-        if lung_mesh.n_points > 0:
-            lung_mesh = lung_mesh.smooth(n_iter=20, relaxation_factor=0.03)
+    # 定义肺叶颜色（5 种颜色，与 render_atlas_complete_3views 一致）
+    lobe_colors = {
+        1: (0.4, 0.6, 0.9),   # 左上叶 - 浅蓝
+        2: (0.2, 0.4, 0.8),   # 左下叶 - 深蓝
+        3: (0.9, 0.6, 0.4),   # 右上叶 - 浅橙
+        4: (0.9, 0.8, 0.4),   # 右中叶 - 黄
+        5: (0.8, 0.4, 0.4),   # 右下叶 - 红
+    }
 
-    logger.info(f"  肺部网格: {lung_mesh.n_points:,} 点")
+    # 存储所有肺叶网格
+    lobe_meshes = []
+
+    # 检查是否有肺叶标签文件
+    use_lobes = False
+    lobes_mask = None
+    trachea_from_digital_base = None  # 从数字肺底座提取的气管树
+
+    if lobes_mask_path and Path(lobes_mask_path).exists():
+        lobes_data = load_nifti(lobes_mask_path)
+
+        if use_digital_base:
+            # 从数字肺底座融合标签中提取肺叶（值 1-5）和气管树（值 6）
+            logger.info("  从数字肺底座提取肺叶和气管树...")
+            lobes_mask = lobes_data.copy()
+            lobes_mask[lobes_mask == 6] = 0  # 移除气管树标签
+            trachea_from_digital_base = (lobes_data == 6).astype(np.uint8)
+            trachea_voxels = np.sum(trachea_from_digital_base)
+            if trachea_voxels > 0:
+                logger.info(f"  气管树（从融合标签）: {int(trachea_voxels):,} 体素")
+        else:
+            lobes_mask = lobes_data
+
+        unique_lobes = np.unique(lobes_mask[(lobes_mask > 0) & (lobes_mask <= 5)])
+        if len(unique_lobes) >= 2:  # 至少有 2 个肺叶标签
+            use_lobes = True
+            logger.info(f"  使用肺叶标签: {len(unique_lobes)} 个肺叶")
+
+    if use_lobes:
+        # 为每个肺叶创建单独的网格
+        for lobe_id in range(1, 6):
+            lobe_binary = (lobes_mask == lobe_id).astype(float)
+            if np.sum(lobe_binary) > 100:  # 至少 100 体素
+                lobe_grid = pv.ImageData()
+                lobe_grid.dimensions = lobe_binary.shape
+                lobe_grid.spacing = spacing
+                lobe_grid.point_data["values"] = lobe_binary.flatten(order="F")
+                lobe_mesh = lobe_grid.contour([0.5], scalars="values")
+                if lobe_mesh.n_points > 0:
+                    lobe_mesh = lobe_mesh.smooth(n_iter=20, relaxation_factor=0.05)
+                    lobe_meshes.append({
+                        'mesh': lobe_mesh,
+                        'color': lobe_colors.get(lobe_id, lung_color),
+                        'lobe_id': lobe_id
+                    })
+                    logger.info(f"    肺叶 {lobe_id}: {lobe_mesh.n_points:,} 点")
+    else:
+        # 使用二值肺部 mask（左右肺合并）
+        if use_mask_surface:
+            lung_grid = pv.ImageData()
+            lung_grid.dimensions = lung_mask.shape
+            lung_grid.spacing = spacing
+            lung_grid.point_data["values"] = lung_mask.astype(float).flatten(order="F")
+            lung_mesh = lung_grid.contour([0.5], scalars="values")
+            if lung_mesh.n_points > 0:
+                lung_mesh = lung_mesh.smooth(n_iter=30, relaxation_factor=0.05)
+        else:
+            lung_grid = pv.ImageData()
+            lung_grid.dimensions = ct_data_masked.shape
+            lung_grid.spacing = spacing
+            lung_grid.point_data["values"] = ct_data_masked.flatten(order="F")
+            lung_mesh = lung_grid.contour([lung_threshold], scalars="values")
+            if lung_mesh.n_points > 0:
+                lung_mesh = lung_mesh.smooth(n_iter=20, relaxation_factor=0.03)
+
+        logger.info(f"  肺部网格: {lung_mesh.n_points:,} 点")
+        lobe_meshes.append({'mesh': lung_mesh, 'color': lung_color, 'lobe_id': 0})
 
     # 病灶网格
     lesion_mesh = None
@@ -562,6 +623,39 @@ def render_multiview(
         if lesion_mesh.n_points > 0:
             lesion_mesh = lesion_mesh.smooth(n_iter=30, relaxation_factor=0.1)
         logger.info(f"  病灶网格: {lesion_mesh.n_points:,} 点")
+
+    # 气管树网格
+    trachea_mesh = None
+
+    # 优先使用从数字肺底座提取的气管树
+    if trachea_from_digital_base is not None and np.sum(trachea_from_digital_base) > 100:
+        trachea_binary = trachea_from_digital_base.astype(float)
+        trachea_voxels = np.sum(trachea_binary)
+
+        trachea_grid = pv.ImageData()
+        trachea_grid.dimensions = trachea_binary.shape
+        trachea_grid.spacing = spacing
+        trachea_grid.point_data["values"] = trachea_binary.flatten(order="F")
+        trachea_mesh = trachea_grid.contour([0.5], scalars="values")
+        if trachea_mesh.n_points > 0:
+            trachea_mesh = trachea_mesh.smooth(n_iter=30, relaxation_factor=0.05)
+            logger.info(f"  气管树网格（数字肺底座）: {trachea_mesh.n_points:,} 点")
+    elif trachea_mask_path and Path(trachea_mask_path).exists() and not use_digital_base:
+        # 从独立文件加载气管树（向后兼容）
+        trachea_mask = load_nifti(trachea_mask_path)
+        trachea_binary = (trachea_mask > 0).astype(float)
+        trachea_voxels = np.sum(trachea_binary)
+        logger.info(f"  气管树 mask: {int(trachea_voxels):,} 体素")
+
+        if trachea_voxels > 100:  # 至少 100 体素
+            trachea_grid = pv.ImageData()
+            trachea_grid.dimensions = trachea_binary.shape
+            trachea_grid.spacing = spacing
+            trachea_grid.point_data["values"] = trachea_binary.flatten(order="F")
+            trachea_mesh = trachea_grid.contour([0.5], scalars="values")
+            if trachea_mesh.n_points > 0:
+                trachea_mesh = trachea_mesh.smooth(n_iter=30, relaxation_factor=0.05)
+                logger.info(f"  气管树网格: {trachea_mesh.n_points:,} 点")
 
     # 创建输出目录
     output_dir = Path(output_dir)
@@ -581,11 +675,22 @@ def render_multiview(
         plotter = pv.Plotter(window_size=window_size, off_screen=True)
         plotter.set_background("white")
 
-        if lung_mesh.n_points > 0:
-            plotter.add_mesh(lung_mesh, color=lung_color, opacity=lung_opacity, smooth_shading=True)
+        # 添加所有肺叶网格
+        for lobe_info in lobe_meshes:
+            if lobe_info['mesh'].n_points > 0:
+                plotter.add_mesh(
+                    lobe_info['mesh'],
+                    color=lobe_info['color'],
+                    opacity=lung_opacity,
+                    smooth_shading=True
+                )
 
         if lesion_mesh is not None and lesion_mesh.n_points > 0:
             plotter.add_mesh(lesion_mesh, color=lesion_color, opacity=lesion_opacity, smooth_shading=True)
+
+        # 添加气管树网格
+        if trachea_mesh is not None and trachea_mesh.n_points > 0:
+            plotter.add_mesh(trachea_mesh, color=trachea_color, opacity=trachea_opacity, smooth_shading=True)
 
         plotter.camera_position = camera_pos
         plotter.camera.zoom(1.3)
