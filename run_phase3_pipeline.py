@@ -618,6 +618,15 @@ def run_texture_training(
         train_config['learning_rate'] = learning_rate
     config['training'] = train_config
 
+    # 根据模型类型创建独立的检查点目录
+    checkpoint_base = Path(config['paths'].get('checkpoints', 'checkpoints'))
+    checkpoint_dir = checkpoint_base / model_type  # 添加模型类型子目录
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # 更新配置中的检查点路径
+    config['paths']['checkpoints'] = str(checkpoint_dir)
+    logger.info(f"  检查点目录: {checkpoint_dir}")
+
     # 显示模型类型
     model_names = {
         'unet': '基线方案 (3D U-Net)',
@@ -660,7 +669,8 @@ def run_texture_inference(
     checkpoint_path: str = None,
     patient_id: str = None,
     device: str = 'cuda',
-    smooth_boundary: bool = True
+    smooth_boundary: bool = True,
+    model_type: str = 'unet'
 ) -> Tuple[bool, Dict]:
     """
     执行 Phase 3B AI 纹理融合推理
@@ -668,10 +678,11 @@ def run_texture_inference(
     Args:
         config: 配置字典
         logger: 日志记录器
-        checkpoint_path: 模型检查点路径
+        checkpoint_path: 模型检查点路径（如果指定，优先使用）
         patient_id: 指定患者 ID（默认处理所有）
         device: 计算设备
         smooth_boundary: 是否平滑边界
+        model_type: 模型类型（用于查找对应的检查点目录）
 
     Returns:
         Tuple[bool, Dict]: (是否成功, 推理结果)
@@ -687,15 +698,33 @@ def run_texture_inference(
     mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
     output_dir = Path(paths.get('final_viz', 'data/04_final_viz'))
 
+    # 确定检查点路径（按优先级查找）
     if checkpoint_path:
+        # 1. 用户指定的路径
         checkpoint = Path(checkpoint_path)
     else:
-        checkpoint = Path(paths.get('checkpoints', 'checkpoints')) / 'best.pth'
+        checkpoint_base = Path(paths.get('checkpoints', 'checkpoints'))
+
+        # 2. 模型类型对应的子目录
+        model_checkpoint = checkpoint_base / model_type / 'best.pth'
+
+        # 3. 向后兼容：旧的检查点位置
+        legacy_checkpoint = checkpoint_base / 'best.pth'
+
+        if model_checkpoint.exists():
+            checkpoint = model_checkpoint
+            logger.info(f"  使用模型类型 '{model_type}' 的检查点")
+        elif legacy_checkpoint.exists():
+            checkpoint = legacy_checkpoint
+            logger.info(f"  使用旧版检查点位置（向后兼容）")
+        else:
+            checkpoint = model_checkpoint  # 使用新路径报错
 
     # 检查文件
     if not checkpoint.exists():
         logger.error(f"  ✗ 模型检查点不存在: {checkpoint}")
         logger.error("  请先运行 Phase 3B 训练: --phase3b")
+        logger.error(f"  提示: 检查点应位于 checkpoints/{model_type}/best.pth")
         return False, {}
 
     if not template_path.exists():
@@ -971,7 +1000,8 @@ def main():
             config, logger,
             checkpoint_path=args.checkpoint,
             patient_id=args.patient,
-            device=args.device
+            device=args.device,
+            model_type=args.model_type  # 传递模型类型
         )
 
         elapsed = time.time() - pipeline_start
@@ -1050,7 +1080,8 @@ def main():
             run_texture_inference(
                 config, logger,
                 checkpoint_path=args.checkpoint,
-                device=args.device
+                device=args.device,
+                model_type=args.model_type  # 传递模型类型
             )
 
     # =========================================================================

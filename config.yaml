@@ -202,6 +202,10 @@ training:
     reconstruction: 1.0
     perceptual: 0.1
     adversarial: 0.01
+    hu_constraint: 0.5    # HU 约束损失权重（鼓励病灶区域生成低 HU 值）
+
+  # HU 约束损失配置（用于生成真实的肺气肿纹理）
+  enable_hu_constraint: true  # 是否启用 HU 约束损失
 
   # 训练控制
   epochs: 100

@@ -87,7 +87,15 @@ class Trainer:
             reconstruction_weight=loss_weights.get('reconstruction', 1.0),
             perceptual_weight=loss_weights.get('perceptual', 0.1),
             adversarial_weight=loss_weights.get('adversarial', 0.01),
+            hu_constraint_weight=loss_weights.get('hu_constraint', 0.5),  # 新增：HU 约束权重
+            enable_hu_constraint=train_config.get('enable_hu_constraint', True),  # 新增：是否启用
         )
+
+        # 日志输出 HU 约束状态
+        if train_config.get('enable_hu_constraint', True):
+            logger.info(f"HU 约束损失: 启用 (权重={loss_weights.get('hu_constraint', 0.5)})")
+        else:
+            logger.info("HU 约束损失: 禁用")
 
         # TensorBoard
         self.writer = None
