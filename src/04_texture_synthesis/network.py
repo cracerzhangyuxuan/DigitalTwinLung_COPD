@@ -169,7 +169,7 @@ class PatchDiscriminator(nn.Module):
             )
             if i > 0:
                 layers.append(nn.BatchNorm3d(feat))
-            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            layers.append(nn.LeakyReLU(0.2, inplace=False))  # 改为 inplace=False 避免梯度问题
             prev_channels = feat
         
         # 最后一层

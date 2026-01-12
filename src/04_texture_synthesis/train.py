@@ -131,47 +131,60 @@ class Trainer:
         self.generator.train()
         if self.discriminator:
             self.discriminator.train()
-        
+
         epoch_losses = {'reconstruction': 0, 'perceptual': 0, 'total': 0}
-        
+
         for batch_idx, batch in enumerate(train_loader):
             input_data = batch['input'].to(self.device)
             target = batch['target'].to(self.device)
             mask = batch['mask'].to(self.device)
-            
+
             # 生成器前向传播
             pred = self.generator(input_data)
-            
-            # 计算损失
+
+            # GAN 训练：先更新判别器，再更新生成器
             if self.discriminator:
-                disc_pred = self.discriminator(pred)
-                g_losses = self.criterion.generator_loss(pred, target, mask, disc_pred)
-                
-                # 判别器更新
+                # ========== 步骤 1: 更新判别器 ==========
                 self.d_optimizer.zero_grad()
+
+                # 判别器对真实样本的预测
                 real_pred = self.discriminator(target)
+                # 判别器对生成样本的预测（detach 防止梯度传回生成器）
                 fake_pred = self.discriminator(pred.detach())
+
+                # 计算判别器损失并更新
                 d_losses = self.criterion.discriminator_loss(real_pred, fake_pred)
                 d_losses['total'].backward()
                 self.d_optimizer.step()
+
+                # ========== 步骤 2: 更新生成器 ==========
+                self.g_optimizer.zero_grad()
+
+                # 重新计算判别器对生成样本的预测（判别器权重已更新）
+                # 这次不 detach，让梯度传回生成器
+                disc_pred_for_g = self.discriminator(pred)
+
+                # 计算生成器损失
+                g_losses = self.criterion.generator_loss(pred, target, mask, disc_pred_for_g)
+                g_losses['total'].backward()
+                self.g_optimizer.step()
             else:
+                # 非 GAN 模式：只更新生成器
+                self.g_optimizer.zero_grad()
                 g_losses = self.criterion.generator_loss(pred, target, mask)
-            
-            # 生成器更新
-            self.g_optimizer.zero_grad()
-            g_losses['total'].backward()
-            self.g_optimizer.step()
-            
+                g_losses['total'].backward()
+                self.g_optimizer.step()
+
             # 累计损失
             for key in epoch_losses:
                 if key in g_losses:
                     epoch_losses[key] += g_losses[key].item()
-        
+
         # 平均损失
         num_batches = len(train_loader)
         for key in epoch_losses:
             epoch_losses[key] /= num_batches
-        
+
         return epoch_losses
     
     def validate(self, val_loader: 'DataLoader') -> Dict[str, float]:
