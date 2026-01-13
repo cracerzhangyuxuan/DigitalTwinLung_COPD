@@ -24,7 +24,7 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
-from .network import InpaintingUNet
+from .network import InpaintingUNet, PartialConvUNet, PatchDiscriminator, create_model
 from ..utils.io import load_nifti, save_nifti
 from ..utils.math_ops import normalize_ct, denormalize_ct
 from ..utils.logger import get_logger
@@ -34,30 +34,42 @@ logger = get_logger(__name__)
 
 def load_model(
     checkpoint_path: Union[str, Path],
-    device: str = "cuda"
-) -> 'InpaintingUNet':
+    device: str = "cuda",
+    model_type: str = "unet"
+) -> 'torch.nn.Module':
     """
     加载训练好的模型
-    
+
     Args:
         checkpoint_path: 检查点路径
         device: 设备
-        
+        model_type: 模型类型 ("unet", "partial_conv", "patchgan")
+
     Returns:
         model: 加载的模型
     """
     if torch is None:
         raise ImportError("PyTorch 未安装")
-    
+
     device = torch.device(device if torch.cuda.is_available() else "cpu")
-    
-    model = InpaintingUNet()
+
+    # 根据模型类型创建对应的网络
+    if model_type == "unet" or model_type == "patchgan":
+        # patchgan 的生成器也是 UNet
+        model = InpaintingUNet()
+    elif model_type == "partial_conv":
+        model = PartialConvUNet()
+    else:
+        logger.warning(f"未知模型类型 '{model_type}'，使用默认 UNet")
+        model = InpaintingUNet()
+
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['generator_state_dict'])
     model.to(device)
     model.eval()
-    
+
     logger.info(f"模型加载完成: {checkpoint_path}")
+    logger.info(f"  模型类型: {model_type}")
     return model
 
 

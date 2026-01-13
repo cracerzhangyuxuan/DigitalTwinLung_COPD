@@ -36,6 +36,49 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     # 限制处理数量
     python run_phase3_pipeline.py --limit 5
 
+    # ============================================================
+    # 推理命令（3条）
+    # ============================================================
+
+    # UNet 模型推理
+    python run_phase3_pipeline.py --inference --model-type unet
+
+    # Partial Conv 模型推理
+    python run_phase3_pipeline.py --inference --model-type partial_conv
+
+    # PatchGAN 模型推理
+    python run_phase3_pipeline.py --inference --model-type patchgan
+
+
+    # ============================================================
+    # 评估命令（3条）
+    # ============================================================
+
+    # UNet 模型评估
+    python run_phase3_pipeline.py --evaluate --model-type unet
+
+    # Partial Conv 模型评估
+    python run_phase3_pipeline.py --evaluate --model-type partial_conv
+
+    # PatchGAN 模型评估
+    python run_phase3_pipeline.py --evaluate --model-type patchgan
+
+
+    # ============================================================
+    # 可视化命令（3条）
+    # ============================================================
+
+    # UNet 结果可视化
+    python run_phase3_pipeline.py --visualize --model-type unet
+
+    # Partial Conv 结果可视化
+    python run_phase3_pipeline.py --visualize --model-type partial_conv
+
+    # PatchGAN 结果可视化
+    python run_phase3_pipeline.py --visualize --model-type patchgan
+
+
+
 作者：DigitalTwinLung COPD Project
 日期：2025-12-30
 更新：2026-01-07 (添加 Phase 3B 支持)
@@ -670,7 +713,8 @@ def run_texture_inference(
     patient_id: str = None,
     device: str = 'cuda',
     smooth_boundary: bool = True,
-    model_type: str = 'unet'
+    model_type: str = 'unet',
+    limit: int = None
 ) -> Tuple[bool, Dict]:
     """
     执行 Phase 3B AI 纹理融合推理
@@ -683,6 +727,7 @@ def run_texture_inference(
         device: 计算设备
         smooth_boundary: 是否平滑边界
         model_type: 模型类型（用于查找对应的检查点目录）
+        limit: 限制处理的患者数量（默认处理所有）
 
     Returns:
         Tuple[bool, Dict]: (是否成功, 推理结果)
@@ -696,7 +741,11 @@ def run_texture_inference(
     # 确定路径
     template_path = Path(paths.get('atlas', 'data/02_atlas')) / 'standard_template.nii.gz'
     mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
-    output_dir = Path(paths.get('final_viz', 'data/04_final_viz'))
+
+    # 输出目录：添加模型类型子目录
+    base_output_dir = Path(paths.get('final_viz', 'data/04_final_viz'))
+    output_dir = base_output_dir / model_type  # 按模型类型分离输出
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # 确定检查点路径（按优先级查找）
     if checkpoint_path:
@@ -745,7 +794,7 @@ def run_texture_inference(
     # 加载模型
     logger.info("  加载模型...")
     try:
-        model = inference_module.load_model(checkpoint, device=device)
+        model = inference_module.load_model(checkpoint, device=device, model_type=model_type)
     except Exception as e:
         logger.error(f"  ✗ 加载模型失败: {e}")
         return False, {}
@@ -756,6 +805,10 @@ def run_texture_inference(
     else:
         patient_dirs = [d for d in sorted(mapped_dir.iterdir())
                        if d.is_dir() and d.name != 'visualizations']
+
+    # 应用 limit 参数
+    if limit and limit > 0:
+        patient_dirs = patient_dirs[:limit]
 
     logger.info(f"  待处理: {len(patient_dirs)} 例")
 
@@ -799,6 +852,278 @@ def run_texture_inference(
     return success_count > 0, results
 
 
+def run_model_evaluation(
+    config: dict,
+    logger: logging.Logger,
+    model_type: str = 'unet',
+    num_patients: int = 10
+) -> bool:
+    """
+    执行模型评估（与真实 COPD CT 对比）
+
+    Args:
+        config: 配置字典
+        logger: 日志记录器
+        model_type: 模型类型
+        num_patients: 评估的患者数量
+
+    Returns:
+        bool: 是否成功
+    """
+    logger.info("")
+    logger.info("[评估] 模型质量评估")
+    logger.info("-" * 40)
+
+    try:
+        import nibabel as nib
+        import numpy as np
+    except ImportError as e:
+        logger.error(f"  ✗ 缺少依赖: {e}")
+        return False
+
+    paths = config.get('paths', {})
+    mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
+    fused_dir = Path(paths.get('final_viz', 'data/04_final_viz')) / model_type
+    output_dir = Path(f'evaluation_results/{model_type}')
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 检查融合结果目录
+    if not fused_dir.exists():
+        logger.error(f"  ✗ 融合结果目录不存在: {fused_dir}")
+        logger.error(f"  请先运行推理: --inference --model-type {model_type}")
+        return False
+
+    fused_files = sorted(fused_dir.glob("*_fused.nii.gz"))[:num_patients]
+    if not fused_files:
+        logger.error(f"  ✗ 未找到融合结果文件")
+        return False
+
+    logger.info(f"  融合结果目录: {fused_dir}")
+    logger.info(f"  评估患者数: {len(fused_files)}")
+    logger.info(f"  输出目录: {output_dir}")
+
+    # 评估每个患者
+    all_metrics = []
+    for fused_path in fused_files:
+        patient_id = fused_path.name.replace('_fused.nii.gz', '')
+        warped_path = mapped_dir / patient_id / f"{patient_id}_warped.nii.gz"
+        mask_path = mapped_dir / patient_id / f"{patient_id}_warped_lesion.nii.gz"
+
+        if not warped_path.exists() or not mask_path.exists():
+            logger.warning(f"  ⚠ 跳过 {patient_id}: 缺少配准数据")
+            continue
+
+        try:
+            # 加载数据
+            fused_data = nib.load(str(fused_path)).get_fdata()
+            real_data = nib.load(str(warped_path)).get_fdata()
+            mask_data = nib.load(str(mask_path)).get_fdata()
+
+            mask_bool = mask_data > 0
+            if mask_bool.sum() < 100:
+                logger.warning(f"  ⚠ 跳过 {patient_id}: 病灶区域太小")
+                continue
+
+            # 计算病灶区域指标
+            real_lesion = real_data[mask_bool]
+            fused_lesion = fused_data[mask_bool]
+
+            # PSNR
+            mse = np.mean((real_lesion - fused_lesion) ** 2)
+            psnr = 20 * np.log10(1400 / np.sqrt(mse)) if mse > 0 else float('inf')
+
+            # SSIM (简化版)
+            mu1, mu2 = np.mean(real_lesion), np.mean(fused_lesion)
+            s1, s2 = np.var(real_lesion), np.var(fused_lesion)
+            s12 = np.mean((real_lesion - mu1) * (fused_lesion - mu2))
+            C1, C2 = 0.01**2, 0.03**2
+            ssim = ((2*mu1*mu2+C1)*(2*s12+C2)) / ((mu1**2+mu2**2+C1)*(s1+s2+C2))
+
+            # HU 分析
+            real_emph = (real_lesion < -950).sum() / len(real_lesion)
+            fused_emph = (fused_lesion < -950).sum() / len(fused_lesion)
+
+            metrics = {
+                'patient_id': patient_id,
+                'psnr': float(psnr),
+                'ssim': float(ssim),
+                'real_emphysema_ratio': float(real_emph),
+                'fused_emphysema_ratio': float(fused_emph),
+                'voxel_count': int(mask_bool.sum())
+            }
+            all_metrics.append(metrics)
+
+            logger.info(f"  ✓ {patient_id}: PSNR={psnr:.2f}dB, SSIM={ssim:.4f}, "
+                       f"肺气肿比例: 真实={real_emph:.1%} AI={fused_emph:.1%}")
+
+        except Exception as e:
+            logger.error(f"  ✗ {patient_id} 评估失败: {e}")
+
+    if not all_metrics:
+        logger.error("  ✗ 没有成功评估的患者")
+        return False
+
+    # 计算平均指标
+    avg_psnr = np.mean([m['psnr'] for m in all_metrics])
+    avg_ssim = np.mean([m['ssim'] for m in all_metrics])
+    avg_real_emph = np.mean([m['real_emphysema_ratio'] for m in all_metrics])
+    avg_fused_emph = np.mean([m['fused_emphysema_ratio'] for m in all_metrics])
+
+    logger.info("")
+    logger.info("  === 评估汇总 ===")
+    logger.info(f"  平均 PSNR: {avg_psnr:.2f} dB")
+    logger.info(f"  平均 SSIM: {avg_ssim:.4f}")
+    logger.info(f"  真实 COPD 平均肺气肿比例: {avg_real_emph:.1%}")
+    logger.info(f"  AI 融合 平均肺气肿比例: {avg_fused_emph:.1%}")
+
+    # 保存报告
+    report_path = output_dir / 'evaluation_report.md'
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(f"# 模型评估报告 - {model_type}\n\n")
+        f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write("## 汇总结果\n\n")
+        f.write(f"| 指标 | 值 |\n|------|----|\n")
+        f.write(f"| 平均 PSNR | {avg_psnr:.2f} dB |\n")
+        f.write(f"| 平均 SSIM | {avg_ssim:.4f} |\n")
+        f.write(f"| 真实肺气肿比例 | {avg_real_emph:.1%} |\n")
+        f.write(f"| AI肺气肿比例 | {avg_fused_emph:.1%} |\n")
+
+    logger.info(f"  ✓ 报告已保存: {report_path}")
+    return True
+
+
+def run_result_visualization(
+    config: dict,
+    logger: logging.Logger,
+    model_type: str = 'unet',
+    num_patients: int = 5
+) -> bool:
+    """
+    生成可视化结果（多视图对比图）
+
+    Args:
+        config: 配置字典
+        logger: 日志记录器
+        model_type: 模型类型
+        num_patients: 可视化的患者数量
+
+    Returns:
+        bool: 是否成功
+    """
+    logger.info("")
+    logger.info("[可视化] 生成结果可视化")
+    logger.info("-" * 40)
+
+    try:
+        import nibabel as nib
+        import numpy as np
+        import matplotlib.pyplot as plt
+    except ImportError as e:
+        logger.error(f"  ✗ 缺少依赖: {e}")
+        return False
+
+    paths = config.get('paths', {})
+    mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
+    atlas_dir = Path(paths.get('atlas', 'data/02_atlas'))
+    fused_dir = Path(paths.get('final_viz', 'data/04_final_viz')) / model_type
+    output_dir = Path(f'visualization_results/{model_type}')
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    template_path = atlas_dir / 'standard_template.nii.gz'
+
+    # 检查文件
+    if not fused_dir.exists():
+        logger.error(f"  ✗ 融合结果目录不存在: {fused_dir}")
+        logger.error(f"  请先运行推理: --inference --model-type {model_type}")
+        return False
+
+    if not template_path.exists():
+        logger.error(f"  ✗ 模板不存在: {template_path}")
+        return False
+
+    fused_files = sorted(fused_dir.glob("*_fused.nii.gz"))[:num_patients]
+    if not fused_files:
+        logger.error(f"  ✗ 未找到融合结果文件")
+        return False
+
+    logger.info(f"  融合结果目录: {fused_dir}")
+    logger.info(f"  可视化患者数: {len(fused_files)}")
+    logger.info(f"  输出目录: {output_dir}")
+
+    # 加载模板
+    template_data = nib.load(str(template_path)).get_fdata()
+
+    model_names = {
+        'unet': '3D U-Net',
+        'partial_conv': 'Partial Conv',
+        'patchgan': 'PatchGAN'
+    }
+
+    success_count = 0
+    for fused_path in fused_files:
+        patient_id = fused_path.name.replace('_fused.nii.gz', '')
+        mask_path = mapped_dir / patient_id / f"{patient_id}_warped_lesion.nii.gz"
+
+        if not mask_path.exists():
+            logger.warning(f"  ⚠ 跳过 {patient_id}: mask 不存在")
+            continue
+
+        try:
+            fused_data = nib.load(str(fused_path)).get_fdata()
+            mask_data = nib.load(str(mask_path)).get_fdata()
+
+            # 找到病灶中心
+            if mask_data.sum() > 0:
+                coords = np.where(mask_data > 0)
+                center = [int(np.mean(c)) for c in coords]
+            else:
+                center = [s // 2 for s in fused_data.shape]
+
+            # 创建可视化
+            fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+            views = ['Axial', 'Coronal', 'Sagittal']
+            slices = [
+                (slice(None), slice(None), center[2]),
+                (slice(None), center[1], slice(None)),
+                (center[0], slice(None), slice(None))
+            ]
+
+            for col, (view, sl) in enumerate(zip(views, slices)):
+                # 模板
+                axes[0, col].imshow(template_data[sl].T, cmap='gray', origin='lower', vmin=-1000, vmax=400)
+                axes[0, col].set_title(f'Template - {view}')
+                axes[0, col].axis('off')
+
+                # AI 融合
+                axes[1, col].imshow(fused_data[sl].T, cmap='gray', origin='lower', vmin=-1000, vmax=400)
+                axes[1, col].set_title(f'{model_names.get(model_type, model_type)} - {view}')
+                axes[1, col].axis('off')
+
+                # 融合 + mask
+                axes[2, col].imshow(fused_data[sl].T, cmap='gray', origin='lower', vmin=-1000, vmax=400)
+                axes[2, col].imshow(mask_data[sl].T, cmap='Reds', alpha=0.4, origin='lower')
+                axes[2, col].set_title(f'Fused + Mask - {view}')
+                axes[2, col].axis('off')
+
+            plt.suptitle(f'{patient_id} | Model: {model_names.get(model_type, model_type)}',
+                        fontsize=14, fontweight='bold')
+            plt.tight_layout()
+
+            output_path = output_dir / f"{patient_id}_visualization.png"
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.close()
+
+            logger.info(f"  ✓ {patient_id}: {output_path.name}")
+            success_count += 1
+
+        except Exception as e:
+            logger.error(f"  ✗ {patient_id} 可视化失败: {e}")
+
+    logger.info("")
+    logger.info(f"  可视化完成: {success_count}/{len(fused_files)} 成功")
+    return success_count > 0
+
+
 # =============================================================================
 # 主函数
 # =============================================================================
@@ -818,11 +1143,19 @@ def main():
   # 快速测试（仅处理 3 例）
   python run_phase3_pipeline.py --quick-test
 
-  # Phase 3B 训练
-  python run_phase3_pipeline.py --phase3b --model-type unet --epochs 50
+  # Phase 3B 训练（三种模型）
+  python run_phase3_pipeline.py --phase3b --model-type unet
+  python run_phase3_pipeline.py --phase3b --model-type partial_conv
+  python run_phase3_pipeline.py --phase3b --model-type patchgan
 
   # Phase 3B 推理
-  python run_phase3_pipeline.py --inference --checkpoint checkpoints/best.pth
+  python run_phase3_pipeline.py --inference --model-type unet
+
+  # 模型评估（与真实 COPD CT 对比）
+  python run_phase3_pipeline.py --evaluate --model-type unet
+
+  # 生成可视化结果
+  python run_phase3_pipeline.py --visualize --model-type unet
 
   # 跳过配准（使用已有结果）
   python run_phase3_pipeline.py --skip-registration
@@ -849,6 +1182,14 @@ def main():
     step_group.add_argument(
         '--inference', action='store_true',
         help='执行 Phase 3B 推理'
+    )
+    step_group.add_argument(
+        '--evaluate', '-e', action='store_true',
+        help='执行模型评估（与真实 COPD CT 对比）'
+    )
+    step_group.add_argument(
+        '--visualize', '-v', action='store_true',
+        help='生成可视化结果（多视图对比图）'
     )
     step_group.add_argument(
         '--full', action='store_true',
@@ -1001,7 +1342,8 @@ def main():
             checkpoint_path=args.checkpoint,
             patient_id=args.patient,
             device=args.device,
-            model_type=args.model_type  # 传递模型类型
+            model_type=args.model_type,
+            limit=args.limit  # 传递 limit 参数
         )
 
         elapsed = time.time() - pipeline_start
@@ -1013,6 +1355,56 @@ def main():
             logger.error("Phase 3B 推理失败")
         logger.info("=" * 60)
         sys.exit(0 if infer_ok else 1)
+
+    # =========================================================================
+    # --evaluate 模式 (模型评估)
+    # =========================================================================
+    if args.evaluate:
+        logger.info("")
+        logger.info("模式: 模型评估 (--evaluate)")
+        logger.info(f"模型类型: {args.model_type}")
+
+        eval_ok = run_model_evaluation(
+            config, logger,
+            model_type=args.model_type,
+            num_patients=args.limit or 10
+        )
+
+        elapsed = time.time() - pipeline_start
+        logger.info("")
+        logger.info("=" * 60)
+        if eval_ok:
+            logger.info(f"模型评估完成，耗时: {elapsed:.1f} 秒")
+            logger.info(f"结果保存: evaluation_results/{args.model_type}/")
+        else:
+            logger.error("模型评估失败")
+        logger.info("=" * 60)
+        sys.exit(0 if eval_ok else 1)
+
+    # =========================================================================
+    # --visualize 模式 (生成可视化)
+    # =========================================================================
+    if args.visualize:
+        logger.info("")
+        logger.info("模式: 生成可视化 (--visualize)")
+        logger.info(f"模型类型: {args.model_type}")
+
+        viz_ok = run_result_visualization(
+            config, logger,
+            model_type=args.model_type,
+            num_patients=args.limit or 5
+        )
+
+        elapsed = time.time() - pipeline_start
+        logger.info("")
+        logger.info("=" * 60)
+        if viz_ok:
+            logger.info(f"可视化生成完成，耗时: {elapsed:.1f} 秒")
+            logger.info(f"结果保存: visualization_results/{args.model_type}/")
+        else:
+            logger.error("可视化生成失败")
+        logger.info("=" * 60)
+        sys.exit(0 if viz_ok else 1)
 
     # =========================================================================
     # 正常流水线 (Phase 3A) 或完整流水线 (--full)
@@ -1081,7 +1473,8 @@ def main():
                 config, logger,
                 checkpoint_path=args.checkpoint,
                 device=args.device,
-                model_type=args.model_type  # 传递模型类型
+                model_type=args.model_type,
+                limit=args.limit  # 传递 limit 参数
             )
 
     # =========================================================================

@@ -7,8 +7,10 @@
 1. [快速开始](#快速开始)
 2. [Phase 3A: 空间映射](#phase-3a-空间映射)
 3. [Phase 3B: AI 纹理融合](#phase-3b-ai-纹理融合)
-4. [完整流水线](#完整流水线)
-5. [常用参数组合](#常用参数组合)
+4. [模型评估](#模型评估)
+5. [结果可视化](#结果可视化)
+6. [完整流水线](#完整流水线)
+7. [批量执行命令](#批量执行命令)
 
 ---
 
@@ -32,6 +34,12 @@ python run_phase3_pipeline.py --phase3b
 
 # 运行 Phase 3B 推理
 python run_phase3_pipeline.py --inference
+
+# 模型评估
+python run_phase3_pipeline.py --evaluate
+
+# 生成可视化
+python run_phase3_pipeline.py --visualize
 ```
 
 ---
@@ -77,13 +85,13 @@ python run_phase3_pipeline.py --viz-only
 
 ```bash
 # 基线方案: U-Net（推荐首选）
-python run_phase3_pipeline.py --phase3b --model-type unet --epochs 50
+python run_phase3_pipeline.py --phase3b --model-type unet
 
 # 进阶方案: Partial Convolution
-python run_phase3_pipeline.py --phase3b --model-type partial_conv --epochs 50
+python run_phase3_pipeline.py --phase3b --model-type partial_conv
 
 # 高级方案: PatchGAN
-python run_phase3_pipeline.py --phase3b --model-type patchgan --epochs 100
+python run_phase3_pipeline.py --phase3b --model-type patchgan
 
 # 自定义训练参数
 python run_phase3_pipeline.py --phase3b \
@@ -96,18 +104,68 @@ python run_phase3_pipeline.py --phase3b \
 ### 推理命令
 
 ```bash
-# 使用默认检查点（checkpoints/best.pth）
-python run_phase3_pipeline.py --inference
+# 使用 UNet 模型推理
+python run_phase3_pipeline.py --inference --model-type unet
+
+# 使用 Partial Conv 模型推理
+python run_phase3_pipeline.py --inference --model-type partial_conv
+
+# 使用 PatchGAN 模型推理
+python run_phase3_pipeline.py --inference --model-type patchgan
 
 # 指定检查点
-python run_phase3_pipeline.py --inference --checkpoint checkpoints/best.pth
+python run_phase3_pipeline.py --inference --checkpoint checkpoints/unet/best.pth
 
 # 处理特定患者
-python run_phase3_pipeline.py --inference --patient COPD001
+python run_phase3_pipeline.py --inference --model-type unet --patient copd_001
 
 # 使用 CPU
 python run_phase3_pipeline.py --inference --device cpu
 ```
+
+---
+
+## 模型评估
+
+评估功能将 AI 融合结果与真实 COPD CT 进行对比，计算 PSNR、SSIM 和肺气肿比例等指标。
+
+```bash
+# 评估 UNet 模型
+python run_phase3_pipeline.py --evaluate --model-type unet
+
+# 评估 Partial Conv 模型
+python run_phase3_pipeline.py --evaluate --model-type partial_conv
+
+# 评估 PatchGAN 模型
+python run_phase3_pipeline.py --evaluate --model-type patchgan
+
+# 限制评估患者数量
+python run_phase3_pipeline.py --evaluate --model-type unet --limit 10
+```
+
+**输出目录**: `evaluation_results/{model_type}/`
+
+---
+
+## 结果可视化
+
+生成多视图对比图（模板 vs AI融合 vs 病灶叠加）。
+
+```bash
+# 可视化 UNet 结果
+python run_phase3_pipeline.py --visualize --model-type unet
+
+# 可视化 Partial Conv 结果
+python run_phase3_pipeline.py --visualize --model-type partial_conv
+
+# 可视化 PatchGAN 结果
+python run_phase3_pipeline.py --visualize --model-type patchgan
+
+# 限制可视化患者数量
+python run_phase3_pipeline.py --visualize --model-type unet --limit 5
+```
+
+**输出目录**: `visualization_results/{model_type}/`
 
 ---
 
@@ -117,7 +175,7 @@ python run_phase3_pipeline.py --inference --device cpu
 
 ```bash
 # 完整流水线: 3A 空间映射 + 3B 训练 + 3B 推理
-python run_phase3_pipeline.py --full --model-type unet --epochs 50
+python run_phase3_pipeline.py --full --model-type unet
 ```
 
 ### 分步运行（推荐）
@@ -130,80 +188,107 @@ python run_phase3_pipeline.py
 # 查看 data/03_mapped/visualizations/ 中的可视化图片
 
 # Step 3: 运行 Phase 3B 训练
-python run_phase3_pipeline.py --phase3b --model-type unet --epochs 50
+python run_phase3_pipeline.py --phase3b --model-type unet
 
 # Step 4: 运行 Phase 3B 推理
-python run_phase3_pipeline.py --inference
+python run_phase3_pipeline.py --inference --model-type unet
 
-# Step 5: 查看最终结果
-# 输出在 data/04_final_viz/ 目录
+# Step 5: 模型评估
+python run_phase3_pipeline.py --evaluate --model-type unet
+
+# Step 6: 生成可视化
+python run_phase3_pipeline.py --visualize --model-type unet
 ```
 
 ---
 
-## 常用参数组合
+## 批量执行命令
 
-### 开发调试
+### PowerShell 单独执行命令（9条）
 
-```bash
-# 快速测试完整流程
-python run_phase3_pipeline.py --quick-test
-python run_phase3_pipeline.py --phase3b --epochs 5 --batch-size 2
-python run_phase3_pipeline.py --inference
+```powershell
+# === 推理命令（3条）===
+python run_phase3_pipeline.py --inference --model-type unet
+python run_phase3_pipeline.py --inference --model-type partial_conv
+python run_phase3_pipeline.py --inference --model-type patchgan
+
+# === 评估命令（3条）===
+python run_phase3_pipeline.py --evaluate --model-type unet
+python run_phase3_pipeline.py --evaluate --model-type partial_conv
+python run_phase3_pipeline.py --evaluate --model-type patchgan
+
+# === 可视化命令（3条）===
+python run_phase3_pipeline.py --visualize --model-type unet
+python run_phase3_pipeline.py --visualize --model-type partial_conv
+python run_phase3_pipeline.py --visualize --model-type patchgan
 ```
 
-### 生产环境
+### PowerShell 一键批量执行
 
-```bash
-# 完整训练（推荐配置）
-python run_phase3_pipeline.py --phase3b \
-    --model-type unet \
-    --epochs 100 \
-    --batch-size 4 \
-    --device cuda
-
-# 高质量训练（PatchGAN）
-python run_phase3_pipeline.py --phase3b \
-    --model-type patchgan \
-    --epochs 200 \
-    --batch-size 2 \
-    --device cuda
+```powershell
+# 依次对三个模型执行推理→评估→可视化
+@("unet", "partial_conv", "patchgan") | ForEach-Object {
+    Write-Host "========== 处理模型: $_ ==========" -ForegroundColor Green
+    python run_phase3_pipeline.py --inference --model-type $_
+    python run_phase3_pipeline.py --evaluate --model-type $_
+    python run_phase3_pipeline.py --visualize --model-type $_
+}
+Write-Host "========== 全部完成! ==========" -ForegroundColor Green
 ```
 
-### 独立脚本（向后兼容）
+### 快速测试命令
 
-```bash
-# 使用独立训练脚本
-python run_phase3b_training.py --model-type unet --epochs 50
-
-# 使用独立推理脚本
-python run_phase3b_inference.py --checkpoint checkpoints/best.pth
+```powershell
+# 仅处理少量数据的快速验证
+python run_phase3_pipeline.py --inference --model-type unet --limit 3
+python run_phase3_pipeline.py --evaluate --model-type unet --limit 3
+python run_phase3_pipeline.py --visualize --model-type unet --limit 3
 ```
 
 ---
 
 ## 输出目录结构
 
-```
+```text
 data/
 ├── 03_mapped/                    # Phase 3A 输出
-│   ├── COPD001/
-│   │   ├── COPD001_warped.nii.gz        # 配准后的 CT
-│   │   └── COPD001_warped_lesion.nii.gz # 配准后的病灶 mask
+│   ├── copd_001/
+│   │   ├── copd_001_warped.nii.gz        # 配准后的 CT
+│   │   └── copd_001_warped_lesion.nii.gz # 配准后的病灶 mask
 │   └── visualizations/
-│       └── COPD001_view_*.png           # 三视图渲染
+│       └── copd_001_view_*.png           # 三视图渲染
 │
-├── 04_final_viz/                 # Phase 3B 输出
-│   └── COPD001_fused.nii.gz     # 融合后的数字孪生 CT
-│
+├── 04_final_viz/                 # Phase 3B 推理输出
+│   ├── unet/                     # UNet 模型结果
+│   │   └── copd_001_fused.nii.gz
+│   ├── partial_conv/             # Partial Conv 模型结果
+│   │   └── copd_001_fused.nii.gz
+│   └── patchgan/                 # PatchGAN 模型结果
+│       └── copd_001_fused.nii.gz
+
 checkpoints/
-├── best.pth                      # 最佳模型
-├── latest.pth                    # 最新检查点
-└── training_log.json             # 训练历史
+├── unet/                         # UNet 检查点
+│   ├── best.pth
+│   └── training_log.json
+├── partial_conv/                 # Partial Conv 检查点
+│   └── best.pth
+└── patchgan/                     # PatchGAN 检查点
+    └── best.pth
+
+evaluation_results/
+├── unet/                         # UNet 评估报告
+│   └── evaluation_report.md
+├── partial_conv/
+└── patchgan/
+
+visualization_results/
+├── unet/                         # UNet 可视化
+│   └── copd_001_visualization.png
+├── partial_conv/
+└── patchgan/
 ```
 
 ---
 
-**文档版本**: v1.0  
-**最后更新**: 2026-01-07
-
+**文档版本**: v2.0
+**最后更新**: 2026-01-13
