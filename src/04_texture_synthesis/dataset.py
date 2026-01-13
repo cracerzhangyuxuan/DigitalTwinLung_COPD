@@ -204,32 +204,35 @@ class LungPatchDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, 'torch.Tensor']:
         vol_idx, center = self.patch_indices[idx]
-        
-        # 加载数据
+
+        # 加载 COPD CT 和 mask
         ct = load_nifti(self.ct_paths[vol_idx])
         mask = load_nifti(self.mask_paths[vol_idx])
-        
+
         # 提取 patch
         ct_patch = self._extract_patch(ct, center)
         mask_patch = self._extract_patch(mask, center)
-        
+
         # 数据增强
         if self.augment:
             ct_patch, mask_patch = self._augment(ct_patch, mask_patch)
-        
-        # 归一化
-        if self.normalize:
-            ct_patch = self._normalize_ct(ct_patch)
-        
-        # 创建输入 (mask 区域置为 0)
-        input_patch = ct_patch.copy()
-        input_patch[mask_patch > 0] = 0
-        
-        # 转换为 tensor
+
+        # 归一化 CT patch (Target)
+        ct_patch_norm = self._normalize_ct(ct_patch)
+
+        # 创建 Input：复制 Target，在 mask 区域填充噪声
+        # 这样模型学习的是"根据周围上下文恢复被遮罩区域的肺气肿纹理"
+        input_patch = ct_patch_norm.copy()
+        if np.sum(mask_patch) > 0:
+            # 用高斯噪声填充 mask 区域，模拟"缺失"数据
+            noise = np.random.normal(0.0, 0.1, input_patch.shape)
+            input_patch[mask_patch > 0] = noise[mask_patch > 0]
+
+        # 转换为 tensor 并返回
         return {
             'input': torch.from_numpy(input_patch[np.newaxis]).float(),
-            'target': torch.from_numpy(ct_patch[np.newaxis]).float(),
-            'mask': torch.from_numpy(mask_patch[np.newaxis]).float(),
+            'target': torch.from_numpy(ct_patch_norm[np.newaxis]).float(),
+            'mask': torch.from_numpy(mask_patch[np.newaxis]).float()
         }
 
 
