@@ -1,8 +1,0 @@
-{
-  "patient_id": "copd_003",
-  "psnr": 22.652664413669463,
-  "ssim": 0.04198535937086054,
-  "real_emphysema_ratio": 0.8486964515181996,
-  "fused_emphysema_ratio": 0.14947275711212393,
-  "voxel_count": 2077790
-}
