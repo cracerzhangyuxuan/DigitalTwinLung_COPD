@@ -875,6 +875,7 @@ def run_model_evaluation(
     logger.info("-" * 40)
 
     try:
+        import json
         import nibabel as nib
         import numpy as np
     except ImportError as e:
@@ -884,7 +885,7 @@ def run_model_evaluation(
     paths = config.get('paths', {})
     mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
     fused_dir = Path(paths.get('final_viz', 'data/04_final_viz')) / model_type
-    output_dir = Path(f'evaluation_results/{model_type}')
+    output_dir = Path(f'results/{model_type}')  # 合并后的输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 检查融合结果目录
@@ -914,6 +915,10 @@ def run_model_evaluation(
             continue
 
         try:
+            # 创建患者子目录
+            patient_output_dir = output_dir / patient_id
+            patient_output_dir.mkdir(parents=True, exist_ok=True)
+
             # 加载数据
             fused_data = nib.load(str(fused_path)).get_fdata()
             real_data = nib.load(str(warped_path)).get_fdata()
@@ -952,6 +957,11 @@ def run_model_evaluation(
                 'voxel_count': int(mask_bool.sum())
             }
             all_metrics.append(metrics)
+
+            # 保存患者单独的评估报告
+            patient_report_path = patient_output_dir / f"{patient_id}_evaluation_report.json"
+            with open(patient_report_path, 'w', encoding='utf-8') as f:
+                json.dump(metrics, f, indent=2, ensure_ascii=False)
 
             logger.info(f"  ✓ {patient_id}: PSNR={psnr:.2f}dB, SSIM={ssim:.4f}, "
                        f"肺气肿比例: 真实={real_emph:.1%} AI={fused_emph:.1%}")
@@ -992,6 +1002,330 @@ def run_model_evaluation(
     return True
 
 
+# =============================================================================
+# 可视化辅助函数
+# =============================================================================
+
+def apply_lung_window(img_data, level=-600, width=1500):
+    """
+    应用肺窗显示
+
+    Args:
+        img_data: CT 图像数据 (HU 值)
+        level: 窗位 (默认 -600)
+        width: 窗宽 (默认 1500)
+
+    Returns:
+        归一化到 [0, 1] 的图像
+    """
+    import numpy as np
+    lower = level - width / 2
+    upper = level + width / 2
+    img_windowed = np.clip(img_data, lower, upper)
+    img_windowed = (img_windowed - lower) / (upper - lower)
+    return img_windowed
+
+
+def get_roi_slice(mask_3d, context_size=32, view='axial'):
+    """
+    自动查找最佳切片和 ROI 区域
+
+    Args:
+        mask_3d: 3D mask 数据
+        context_size: ROI 半径
+        view: 视图类型 ('axial', 'coronal', 'sagittal')
+
+    Returns:
+        slice_idx: 最佳切片索引
+        roi_coords: (y_start, y_end, x_start, x_end)
+    """
+    import numpy as np
+
+    # 根据视图类型选择切片轴
+    if view == 'axial':
+        # Axial: 沿 Z 轴切片，显示 X-Y 平面
+        axis_sum = (0, 1)  # 对 X, Y 求和
+        slice_axis = 2
+    elif view == 'coronal':
+        # Coronal: 沿 Y 轴切片，显示 X-Z 平面
+        axis_sum = (0, 2)  # 对 X, Z 求和
+        slice_axis = 1
+    else:  # sagittal
+        # Sagittal: 沿 X 轴切片，显示 Y-Z 平面
+        axis_sum = (1, 2)  # 对 Y, Z 求和
+        slice_axis = 0
+
+    # 找到病灶面积最大的切片
+    sums = np.sum(mask_3d, axis=axis_sum)
+    slice_idx = int(np.argmax(sums))
+    if sums[slice_idx] == 0:
+        slice_idx = mask_3d.shape[slice_axis] // 2
+
+    # 提取 2D 切片
+    if view == 'axial':
+        mask_slice = mask_3d[:, :, slice_idx]
+    elif view == 'coronal':
+        mask_slice = mask_3d[:, slice_idx, :]
+    else:  # sagittal
+        mask_slice = mask_3d[slice_idx, :, :]
+
+    # 找到病灶中心
+    coords = np.argwhere(mask_slice > 0)
+    if len(coords) > 0:
+        y_c, x_c = coords.mean(axis=0).astype(int)
+    else:
+        y_c, x_c = mask_slice.shape[0] // 2, mask_slice.shape[1] // 2
+
+    # 定义 ROI 边界
+    y_start = max(0, y_c - context_size)
+    y_end = min(mask_slice.shape[0], y_c + context_size)
+    x_start = max(0, x_c - context_size)
+    x_end = min(mask_slice.shape[1], x_c + context_size)
+
+    return slice_idx, (y_start, y_end, x_start, x_end)
+
+
+def plot_comparison(img_a, title_a, img_b, title_b, mask, roi_coords, save_path, suptitle, view='axial'):
+    """
+    绘制 2×4 对比图（同时显示差异热力图和 Mask 叠加）
+
+    Args:
+        img_a: 图像 A (2D 切片)
+        title_a: 图像 A 标题
+        img_b: 图像 B (2D 切片)
+        title_b: 图像 B 标题
+        mask: mask 切片
+        roi_coords: ROI 坐标 (y1, y2, x1, x2)
+        save_path: 保存路径
+        suptitle: 总标题
+        view: 视图类型 ('axial', 'coronal', 'sagittal')
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    y1, y2, x1, x2 = roi_coords
+    roi_a = img_a[y1:y2, x1:x2]
+    roi_b = img_b[y1:y2, x1:x2]
+    roi_mask = mask[y1:y2, x1:x2]
+
+    # 计算差异
+    diff = np.abs(img_a - img_b)
+    roi_diff = diff[y1:y2, x1:x2]
+
+    fig = plt.figure(figsize=(20, 10), dpi=150)
+    gs = fig.add_gridspec(2, 4, wspace=0.15, hspace=0.2)
+
+    view_label = view.capitalize()
+
+    # ========== Row 1: Global View ==========
+    # Col 1: Image A
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.imshow(apply_lung_window(img_a).T, cmap='gray', origin='lower')
+    ax1.set_title(title_a, fontsize=11, fontweight='bold')
+    rect = mpatches.Rectangle((y1, x1), y2-y1, x2-x1, linewidth=2, edgecolor='yellow', facecolor='none')
+    ax1.add_patch(rect)
+    ax1.axis('off')
+
+    # Col 2: Image B
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.imshow(apply_lung_window(img_b).T, cmap='gray', origin='lower')
+    ax2.set_title(title_b, fontsize=11, fontweight='bold')
+    ax2.axis('off')
+
+    # Col 3: Difference Heatmap
+    ax3 = fig.add_subplot(gs[0, 2])
+    bg = apply_lung_window(img_a).T
+    ax3.imshow(bg, cmap='gray', alpha=0.5, origin='lower')
+    im = ax3.imshow(diff.T, cmap='jet', alpha=0.6, origin='lower', vmin=0, vmax=500)
+    ax3.set_title("Difference Map", fontsize=11)
+    plt.colorbar(im, ax=ax3, fraction=0.046, pad=0.04)
+    ax3.axis('off')
+
+    # Col 4: Mask Overlay
+    ax4 = fig.add_subplot(gs[0, 3])
+    ax4.imshow(apply_lung_window(img_b).T, cmap='gray', origin='lower')
+    ax4.imshow(mask.T, cmap='Reds', alpha=0.4, origin='lower')
+    ax4.set_title("Lesion Mask Overlay", fontsize=11)
+    ax4.axis('off')
+
+    # ========== Row 2: ROI Zoom ==========
+    # Col 1: ROI Image A
+    ax5 = fig.add_subplot(gs[1, 0])
+    ax5.imshow(apply_lung_window(roi_a).T, cmap='gray', origin='lower')
+    ax5.set_title(f"ROI: {title_a}", fontsize=10)
+    for spine in ax5.spines.values():
+        spine.set_edgecolor('yellow')
+        spine.set_linewidth(2)
+    ax5.axis('off')
+
+    # Col 2: ROI Image B
+    ax6 = fig.add_subplot(gs[1, 1])
+    ax6.imshow(apply_lung_window(roi_b).T, cmap='gray', origin='lower')
+    ax6.set_title(f"ROI: {title_b}", fontsize=10)
+    ax6.axis('off')
+
+    # Col 3: ROI Difference
+    ax7 = fig.add_subplot(gs[1, 2])
+    roi_bg = apply_lung_window(roi_a).T
+    ax7.imshow(roi_bg, cmap='gray', alpha=0.5, origin='lower')
+    ax7.imshow(roi_diff.T, cmap='jet', alpha=0.6, origin='lower', vmin=0, vmax=500)
+    ax7.set_title("ROI: Difference", fontsize=10)
+    ax7.axis('off')
+
+    # Col 4: ROI Mask Overlay
+    ax8 = fig.add_subplot(gs[1, 3])
+    ax8.imshow(apply_lung_window(roi_b).T, cmap='gray', origin='lower')
+    ax8.imshow(roi_mask.T, cmap='Reds', alpha=0.4, origin='lower')
+    ax8.set_title("ROI: Mask Overlay", fontsize=10)
+    ax8.axis('off')
+
+    plt.suptitle(f"{suptitle} [{view_label}]", fontsize=14, y=0.98)
+    plt.savefig(save_path, bbox_inches='tight', pad_inches=0.1)
+    plt.close()
+
+
+def plot_histogram(data_dict, save_path, title):
+    """
+    绘制专业的 HU 分布直方图（论文发表质量）
+
+    参考图片格式：左侧直方图 + 右侧详细统计信息文本框
+
+    Args:
+        data_dict: {'Label': numpy_array_of_values, ...}
+        save_path: 保存路径
+        title: 图表标题
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # 设置专业风格（兼容不同版本的 matplotlib）
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except OSError:
+        try:
+            plt.style.use('seaborn-whitegrid')
+        except OSError:
+            pass  # 使用默认样式
+
+    # 创建图形：左侧直方图 + 右侧文本框
+    fig = plt.figure(figsize=(14, 6), dpi=150)
+    gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.3)
+    ax_hist = fig.add_subplot(gs[0, 0])
+    ax_text = fig.add_subplot(gs[0, 1])
+
+    # 颜色方案（专业配色）
+    colors = {
+        'Template': '#3498db',      # 蓝色
+        'AI Fused': '#e74c3c',      # 红色
+        'Real COPD': '#27ae60'      # 绿色
+    }
+
+    # 存储统计数据
+    stats_data = {}
+
+    # 绘制直方图
+    for label, data in data_dict.items():
+        if data is None or len(data) == 0:
+            continue
+
+        data_flat = data.flatten()
+        color = colors.get(label, '#7f8c8d')
+
+        # 绘制直方图（填充 + 边框）- 使用 density=True 进行归一化
+        ax_hist.hist(data_flat, bins=80, range=(-1024, 0),
+                     alpha=0.35, label=None, color=color, density=True, histtype='stepfilled')
+        ax_hist.hist(data_flat, bins=80, range=(-1024, 0),
+                     alpha=1.0, color=color, density=True, histtype='step', linewidth=2, label=label)
+
+        # 计算统计信息
+        stats_data[label] = {
+            'mean': np.mean(data_flat),
+            'std': np.std(data_flat),
+            'min': np.min(data_flat),
+            'max': np.max(data_flat),
+            'emphysema_ratio': np.sum(data_flat < -950) / len(data_flat) * 100
+        }
+
+    # 添加肺气肿阈值参考线
+    ax_hist.axvline(x=-950, color='#2c3e50', linestyle='--', linewidth=2, alpha=0.8, label='Emphysema threshold (-950)')
+
+    # 设置直方图坐标轴
+    ax_hist.set_xlim(-1024, 0)
+    ax_hist.set_xlabel("HU Value", fontsize=12, fontweight='bold')
+    ax_hist.set_ylabel("Density", fontsize=12, fontweight='bold')
+    ax_hist.set_title("HU Distribution in Lesion Region", fontsize=13, fontweight='bold')
+    ax_hist.legend(loc='upper right', fontsize=9, framealpha=0.9)
+    ax_hist.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    ax_hist.set_axisbelow(True)
+
+    # 构建右侧统计信息文本框（参考上传图片格式）
+    text_lines = ["HU Value Statistics (Lesion Region)", "=" * 40, ""]
+
+    # Real COPD CT 统计
+    if 'Real COPD' in stats_data:
+        s = stats_data['Real COPD']
+        text_lines.extend([
+            "Real COPD CT:",
+            f"  Mean HU: {s['mean']:.1f}",
+            f"  Std HU: {s['std']:.1f}",
+            f"  Min HU: {s['min']:.1f}",
+            f"  Max HU: {s['max']:.1f}",
+            f"  Emphysema (HU<-950): {s['emphysema_ratio']:.1f}%",
+            ""
+        ])
+
+    # AI Fused CT 统计
+    if 'AI Fused' in stats_data:
+        s = stats_data['AI Fused']
+        text_lines.extend([
+            "AI Fused CT:",
+            f"  Mean HU: {s['mean']:.1f}",
+            f"  Std HU: {s['std']:.1f}",
+            f"  Min HU: {s['min']:.1f}",
+            f"  Max HU: {s['max']:.1f}",
+            f"  Emphysema (HU<-950): {s['emphysema_ratio']:.1f}%",
+            ""
+        ])
+
+    # Template 统计（如果存在）
+    if 'Template' in stats_data:
+        s = stats_data['Template']
+        text_lines.extend([
+            "Healthy Template:",
+            f"  Mean HU: {s['mean']:.1f}",
+            f"  Std HU: {s['std']:.1f}",
+            f"  Min HU: {s['min']:.1f}",
+            f"  Max HU: {s['max']:.1f}",
+            f"  Emphysema (HU<-950): {s['emphysema_ratio']:.1f}%",
+            ""
+        ])
+
+    # 计算差异（如果 Real COPD 和 AI Fused 都存在）
+    if 'Real COPD' in stats_data and 'AI Fused' in stats_data:
+        mean_diff = stats_data['AI Fused']['mean'] - stats_data['Real COPD']['mean']
+        emph_diff = stats_data['AI Fused']['emphysema_ratio'] - stats_data['Real COPD']['emphysema_ratio']
+        text_lines.extend([
+            "Difference:",
+            f"  Mean HU Diff: {mean_diff:.1f}",
+            f"  Emphysema Diff: {emph_diff:.1f}%"
+        ])
+
+    # 在右侧子图显示文本（无背景填充，纯文字）
+    ax_text.axis('off')
+    text_str = '\n'.join(text_lines)
+    ax_text.text(0.05, 0.95, text_str, transform=ax_text.transAxes,
+                 fontsize=9, verticalalignment='top', fontfamily='monospace')
+
+    # 设置总标题
+    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+
+    # 保存
+    plt.savefig(save_path, bbox_inches='tight', facecolor='white', edgecolor='none')
+    plt.close()
+    plt.style.use('default')  # 恢复默认样式
+
+
 def run_result_visualization(
     config: dict,
     logger: logging.Logger,
@@ -999,7 +1333,12 @@ def run_result_visualization(
     num_patients: int = 5
 ) -> bool:
     """
-    生成可视化结果（多视图对比图）
+    生成可视化结果（三图输出策略）
+
+    输出文件：
+    - {patient_id}_viz_1_generation.png: 生成效果分析（Template vs AI Fused）
+    - {patient_id}_viz_2_realism.png: 真实性分析（Real COPD vs AI Fused）
+    - {patient_id}_viz_3_histogram.png: HU 分布直方图
 
     Args:
         config: 配置字典
@@ -1011,13 +1350,12 @@ def run_result_visualization(
         bool: 是否成功
     """
     logger.info("")
-    logger.info("[可视化] 生成结果可视化")
+    logger.info("[可视化] 生成结果可视化（三图输出）")
     logger.info("-" * 40)
 
     try:
         import nibabel as nib
-        import numpy as np
-        import matplotlib.pyplot as plt
+        import numpy as np  # noqa: F401 - 用于检查依赖
     except ImportError as e:
         logger.error(f"  ✗ 缺少依赖: {e}")
         return False
@@ -1026,7 +1364,7 @@ def run_result_visualization(
     mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
     atlas_dir = Path(paths.get('atlas', 'data/02_atlas'))
     fused_dir = Path(paths.get('final_viz', 'data/04_final_viz')) / model_type
-    output_dir = Path(f'visualization_results/{model_type}')
+    output_dir = Path(f'results/{model_type}')  # 合并后的输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
 
     template_path = atlas_dir / 'standard_template.nii.gz'
@@ -1058,62 +1396,99 @@ def run_result_visualization(
         'partial_conv': 'Partial Conv',
         'patchgan': 'PatchGAN'
     }
+    model_name = model_names.get(model_type, model_type)
 
     success_count = 0
     for fused_path in fused_files:
         patient_id = fused_path.name.replace('_fused.nii.gz', '')
         mask_path = mapped_dir / patient_id / f"{patient_id}_warped_lesion.nii.gz"
+        real_path = mapped_dir / patient_id / f"{patient_id}_warped.nii.gz"
 
         if not mask_path.exists():
             logger.warning(f"  ⚠ 跳过 {patient_id}: mask 不存在")
             continue
 
         try:
+            # 创建患者子目录
+            patient_output_dir = output_dir / patient_id
+            patient_output_dir.mkdir(parents=True, exist_ok=True)
+
+            # 1. 加载数据
             fused_data = nib.load(str(fused_path)).get_fdata()
             mask_data = nib.load(str(mask_path)).get_fdata()
+            real_data = nib.load(str(real_path)).get_fdata() if real_path.exists() else None
 
-            # 找到病灶中心
-            if mask_data.sum() > 0:
-                coords = np.where(mask_data > 0)
-                center = [int(np.mean(c)) for c in coords]
-            else:
-                center = [s // 2 for s in fused_data.shape]
+            files_generated = 0
 
-            # 创建可视化
-            fig, axes = plt.subplots(3, 3, figsize=(15, 15))
-            views = ['Axial', 'Coronal', 'Sagittal']
-            slices = [
-                (slice(None), slice(None), center[2]),
-                (slice(None), center[1], slice(None)),
-                (center[0], slice(None), slice(None))
-            ]
+            # 2. 为每个视图生成可视化
+            for view in ['axial', 'coronal', 'sagittal']:
+                # 获取该视图的最佳切片和 ROI
+                slice_idx, roi_coords = get_roi_slice(mask_data, context_size=48, view=view)
 
-            for col, (view, sl) in enumerate(zip(views, slices)):
-                # 模板
-                axes[0, col].imshow(template_data[sl].T, cmap='gray', origin='lower', vmin=-1000, vmax=400)
-                axes[0, col].set_title(f'Template - {view}')
-                axes[0, col].axis('off')
+                # 提取 2D 切片
+                if view == 'axial':
+                    template_slice = template_data[:, :, slice_idx]
+                    fused_slice = fused_data[:, :, slice_idx]
+                    mask_slice = mask_data[:, :, slice_idx]
+                    real_slice = real_data[:, :, slice_idx] if real_data is not None else None
+                elif view == 'coronal':
+                    template_slice = template_data[:, slice_idx, :]
+                    fused_slice = fused_data[:, slice_idx, :]
+                    mask_slice = mask_data[:, slice_idx, :]
+                    real_slice = real_data[:, slice_idx, :] if real_data is not None else None
+                else:  # sagittal
+                    template_slice = template_data[slice_idx, :, :]
+                    fused_slice = fused_data[slice_idx, :, :]
+                    mask_slice = mask_data[slice_idx, :, :]
+                    real_slice = real_data[slice_idx, :, :] if real_data is not None else None
 
-                # AI 融合
-                axes[1, col].imshow(fused_data[sl].T, cmap='gray', origin='lower', vmin=-1000, vmax=400)
-                axes[1, col].set_title(f'{model_names.get(model_type, model_type)} - {view}')
-                axes[1, col].axis('off')
+                # 生成图像 1：Generation（Template vs Fused）
+                plot_comparison(
+                    template_slice, "Healthy Template",
+                    fused_slice, f"AI Fused ({model_name})",
+                    mask_slice, roi_coords,
+                    patient_output_dir / f"{patient_id}_viz_1_generation_{view}.png",
+                    f"{patient_id} - Generation Effectiveness",
+                    view=view
+                )
+                files_generated += 1
 
-                # 融合 + mask
-                axes[2, col].imshow(fused_data[sl].T, cmap='gray', origin='lower', vmin=-1000, vmax=400)
-                axes[2, col].imshow(mask_data[sl].T, cmap='Reds', alpha=0.4, origin='lower')
-                axes[2, col].set_title(f'Fused + Mask - {view}')
-                axes[2, col].axis('off')
+                # 生成图像 2：Realism（Real vs Fused）- 仅当真实数据存在时
+                if real_slice is not None:
+                    plot_comparison(
+                        real_slice, "Real COPD",
+                        fused_slice, f"AI Fused ({model_name})",
+                        mask_slice, roi_coords,
+                        patient_output_dir / f"{patient_id}_viz_2_realism_{view}.png",
+                        f"{patient_id} - Fidelity Analysis",
+                        view=view
+                    )
+                    files_generated += 1
 
-            plt.suptitle(f'{patient_id} | Model: {model_names.get(model_type, model_type)}',
-                        fontsize=14, fontweight='bold')
-            plt.tight_layout()
+            # 3. 生成 Histogram（仅基于 axial 视图的 ROI）
+            slice_idx_axial, roi_coords_axial = get_roi_slice(mask_data, context_size=48, view='axial')
+            y1, y2, x1, x2 = roi_coords_axial
+            mask_slice_axial = mask_data[:, :, slice_idx_axial]
+            template_slice_axial = template_data[:, :, slice_idx_axial]
+            fused_slice_axial = fused_data[:, :, slice_idx_axial]
+            roi_mask = mask_slice_axial[y1:y2, x1:x2]
 
-            output_path = output_dir / f"{patient_id}_visualization.png"
-            plt.savefig(output_path, dpi=150, bbox_inches='tight')
-            plt.close()
+            hist_data = {
+                'Template': template_slice_axial[y1:y2, x1:x2][roi_mask > 0],
+                'AI Fused': fused_slice_axial[y1:y2, x1:x2][roi_mask > 0],
+            }
+            if real_data is not None:
+                real_slice_axial = real_data[:, :, slice_idx_axial]
+                hist_data['Real COPD'] = real_slice_axial[y1:y2, x1:x2][roi_mask > 0]
 
-            logger.info(f"  ✓ {patient_id}: {output_path.name}")
+            plot_histogram(
+                hist_data,
+                patient_output_dir / f"{patient_id}_viz_3_histogram.png",
+                f"{patient_id} - HU Distribution in Lesion ROI"
+            )
+            files_generated += 1
+
+            logger.info(f"  ✓ {patient_id}: 生成 {files_generated} 张可视化图像")
             success_count += 1
 
         except Exception as e:
@@ -1375,7 +1750,7 @@ def main():
         logger.info("=" * 60)
         if eval_ok:
             logger.info(f"模型评估完成，耗时: {elapsed:.1f} 秒")
-            logger.info(f"结果保存: evaluation_results/{args.model_type}/")
+            logger.info(f"结果保存: results/{args.model_type}/")
         else:
             logger.error("模型评估失败")
         logger.info("=" * 60)
@@ -1400,7 +1775,7 @@ def main():
         logger.info("=" * 60)
         if viz_ok:
             logger.info(f"可视化生成完成，耗时: {elapsed:.1f} 秒")
-            logger.info(f"结果保存: visualization_results/{args.model_type}/")
+            logger.info(f"结果保存: results/{args.model_type}/")
         else:
             logger.error("可视化生成失败")
         logger.info("=" * 60)
