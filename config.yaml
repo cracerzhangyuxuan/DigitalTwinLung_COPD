@@ -197,12 +197,15 @@ training:
   lr_scheduler: "cosine"  # "step", "cosine", "warmup_cosine"
   warmup_epochs: 5        # warmup 轮数（仅 warmup_cosine 使用）
 
-  # 损失函数权重
+  # 损失函数权重（2026-01-21 激进调整：解决"灰值问题"）
+  # 问题：模型生成"深灰色"(-920 HU) 而非"肺气肿黑色"(<-950 HU)
+  # 解决方案：大幅提升 hu_constraint 和 adversarial_loss
   loss_weights:
-    reconstruction: 1.0
-    perceptual: 0.1
-    adversarial: 0.01
-    hu_constraint: 0.5    # HU 约束损失权重（鼓励病灶区域生成低 HU 值）
+    l1_loss: 1.0           # L1 重建损失（基线）
+    reconstruction: 1.0    # 重建损失（兼容旧配置）
+    perceptual: 5.0        # 感知损失（提升至 5.0，增强纹理细节）
+    adversarial: 0.2       # 对抗损失（提升至 0.2，增强真实性）
+    hu_constraint: 10.0    # HU 约束损失（提升至 10.0，强制生成低 HU 值）
 
   # HU 约束损失配置（用于生成真实的肺气肿纹理）
   enable_hu_constraint: true  # 是否启用 HU 约束损失

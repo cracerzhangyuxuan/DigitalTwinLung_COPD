@@ -220,13 +220,16 @@ class LungPatchDataset(Dataset):
         # 归一化 CT patch (Target)
         ct_patch_norm = self._normalize_ct(ct_patch)
 
-        # 创建 Input：复制 Target，在 mask 区域填充噪声
-        # 这样模型学习的是"根据周围上下文恢复被遮罩区域的肺气肿纹理"
+        # 创建 Input：复制 Target，在 mask 区域填充均匀噪声
+        # 使用宽范围的均匀噪声 [0, 1]，防止模型依赖固定的"灰色"均值
+        # 这迫使模型学习从上下文推断正确的低 HU 值，而非简单填充中间值
         input_patch = ct_patch_norm.copy()
         if np.sum(mask_patch) > 0:
-            # 用高斯噪声填充 mask 区域，模拟"缺失"数据
-            noise = np.random.normal(0.0, 0.1, input_patch.shape)
-            input_patch[mask_patch > 0] = noise[mask_patch > 0]
+            # 使用均匀噪声 [0, 1] 填充 mask 区域
+            # 注意：0 对应 HU_min (-1000)，1 对应 HU_max (400)
+            # 宽范围噪声防止模型偏向任何特定值
+            uniform_noise = np.random.uniform(0.0, 1.0, input_patch.shape)
+            input_patch[mask_patch > 0] = uniform_noise[mask_patch > 0]
 
         # 转换为 tensor 并返回
         return {
