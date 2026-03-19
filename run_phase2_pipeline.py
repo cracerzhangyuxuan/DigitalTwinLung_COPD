@@ -81,13 +81,20 @@ def check_antspy():
 # =============================================================================
 
 def setup_logging(log_dir: Path = None) -> logging.Logger:
-    """配置日志"""
+    """配置日志（强制 UTF-8，避免 Windows 终端乱码）"""
     if log_dir is None:
         log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"phase2_pipeline_{timestamp}.log"
+
+    # 强制 stdout 使用 UTF-8（Python 3.7+）
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
     # 创建 logger
     logger = logging.getLogger("Phase2Pipeline")
@@ -106,8 +113,11 @@ def setup_logging(log_dir: Path = None) -> logging.Logger:
     )
     file_handler.setFormatter(file_formatter)
 
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
+    # 控制台处理器（显式指定 sys.stdout + UTF-8）
+    console_stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8',
+                          errors='replace', closefd=False) \
+        if hasattr(sys.stdout, 'fileno') else sys.stdout
+    console_handler = logging.StreamHandler(console_stream)
     console_handler.setLevel(logging.INFO)
     console_formatter = logging.Formatter(
         '%(asctime)s | %(levelname)-8s | %(message)s',
@@ -158,38 +168,44 @@ def run_environment_check(logger: logging.Logger) -> bool:
 # 数据验证
 # =============================================================================
 
-def run_data_validation(config: dict, logger: logging.Logger, 
-                        quick_test: bool = False) -> Tuple[bool, int]:
+def run_data_validation(config: dict, logger: logging.Logger,
+                        quick_test: bool = False,
+                        use_expiration: bool = False) -> Tuple[bool, int]:
     """验证输入数据"""
     logger.info("=" * 60)
     logger.info("步骤 2: 数据验证")
     logger.info("=" * 60)
-    
+
     raw_dir = Path(config['paths']['raw_data'])
     normal_dir = raw_dir / 'normal'
-    
+
     if not normal_dir.exists():
         logger.error(f"数据目录不存在: {normal_dir}")
         return False, 0
-    
-    nifti_files = sorted(list(normal_dir.glob("*.nii.gz")))
+
+    # 按文件名筛选对应相位（吸气相排除 _exp，呼气相仅匹配 _exp）
+    all_nifti = sorted(list(normal_dir.glob("*.nii.gz")))
+    if use_expiration:
+        nifti_files = [f for f in all_nifti if '_exp' in f.stem]
+    else:
+        nifti_files = [f for f in all_nifti if '_exp' not in f.stem]
     file_count = len(nifti_files)
-    
+
     logger.info(f"  数据目录: {normal_dir}")
     logger.info(f"  NIfTI 文件数: {file_count}")
-    
+
     if file_count == 0:
         logger.error("未找到 NIfTI 文件")
         return False, 0
-    
+
     if quick_test:
         logger.info(f"  快速测试模式: 仅处理前 3 例")
         file_count = min(3, file_count)
-    
+
     # 检查文件大小
     total_size = sum(f.stat().st_size for f in nifti_files[:file_count])
     logger.info(f"  总数据大小: {total_size / 1e9:.2f} GB")
-    
+
     logger.info("数据验证通过")
     return True, file_count
 
@@ -202,7 +218,8 @@ def run_segmentation(config: dict, logger: logging.Logger,
                      device: str = "gpu", quick_test: bool = False,
                      force: bool = False, limit: int = None,
                      lobe_model: str = "lungmask",
-                     extract_trachea: bool = True) -> bool:
+                     extract_trachea: bool = True,
+                     use_expiration: bool = False) -> bool:
     """
     运行肺部分割
 
@@ -253,15 +270,19 @@ def run_segmentation(config: dict, logger: logging.Logger,
     cleaned_dir = Path(config['paths']['cleaned_data'])
 
     normal_input = raw_dir / 'normal'
-    mask_output = cleaned_dir / 'normal_mask'
+    mask_output  = cleaned_dir / 'normal_mask'
     clean_output = cleaned_dir / 'normal_clean'
 
     # 创建输出目录
     mask_output.mkdir(parents=True, exist_ok=True)
     clean_output.mkdir(parents=True, exist_ok=True)
 
-    # 获取输入文件数量
-    nifti_files = sorted(list(normal_input.glob("*.nii.gz")))
+    # 获取输入文件数量（按文件名筛选对应相位）
+    all_nifti = sorted(list(normal_input.glob("*.nii.gz")))
+    if use_expiration:
+        nifti_files = [f for f in all_nifti if '_exp' in f.stem]
+    else:
+        nifti_files = [f for f in all_nifti if '_exp' not in f.stem]
     total_count = len(nifti_files)
 
     # 确定处理数量
@@ -348,18 +369,26 @@ def run_segmentation(config: dict, logger: logging.Logger,
 # 质量检查
 # =============================================================================
 
-def run_quality_check(config: dict, logger: logging.Logger) -> Tuple[bool, int]:
+def run_quality_check(config: dict, logger: logging.Logger,
+                      use_expiration: bool = False) -> Tuple[bool, int]:
     """检查分割质量"""
     logger.info("=" * 60)
     logger.info("步骤 4: 质量检查")
     logger.info("=" * 60)
-    
+
     cleaned_dir = Path(config['paths']['cleaned_data'])
     clean_dir = cleaned_dir / 'normal_clean'
-    mask_dir = cleaned_dir / 'normal_mask'
-    
-    clean_files = sorted(list(clean_dir.glob("*.nii.gz")))
-    mask_files = sorted(list(mask_dir.glob("*.nii.gz")))
+    mask_dir  = cleaned_dir / 'normal_mask'
+
+    # 按文件名筛选对应相位
+    all_clean = sorted(list(clean_dir.glob("*.nii.gz")))
+    all_mask  = sorted(list(mask_dir.glob("*.nii.gz")))
+    if use_expiration:
+        clean_files = [f for f in all_clean if '_exp' in f.stem]
+        mask_files  = [f for f in all_mask  if '_exp' in f.stem]
+    else:
+        clean_files = [f for f in all_clean if '_exp' not in f.stem]
+        mask_files  = [f for f in all_mask  if '_exp' not in f.stem]
     
     logger.info(f"  Clean 文件: {len(clean_files)}")
     logger.info(f"  Mask 文件: {len(mask_files)}")
@@ -393,7 +422,8 @@ def run_quality_check(config: dict, logger: logging.Logger) -> Tuple[bool, int]:
 
 def run_atlas_construction(config: dict, logger: logging.Logger,
                            quick_test: bool = False,
-                           skip_template_build: bool = False) -> bool:
+                           skip_template_build: bool = False,
+                           use_expiration: bool = False) -> bool:
     """
     构建标准肺模板（含气管树模板）
 
@@ -408,6 +438,7 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
         logger: 日志记录器
         quick_test: 是否快速测试模式
         skip_template_build: 是否跳过模板构建（仅生成气管树模板）
+        use_expiration: 是否使用呼气相数据流
 
     Returns:
         bool: 是否成功
@@ -429,10 +460,10 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
         return False
 
     cleaned_dir = Path(config['paths']['cleaned_data'])
-    atlas_dir = Path(config['paths']['atlas'])
+    atlas_dir   = Path(config['paths']['atlas'])
 
     input_dir = cleaned_dir / 'normal_clean'
-    mask_dir = cleaned_dir / 'normal_mask'
+    mask_dir  = cleaned_dir / 'normal_mask'
     atlas_dir.mkdir(parents=True, exist_ok=True)
 
     # 检查模板文件（如果跳过构建）
@@ -445,9 +476,15 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
         size_mb = template_file.stat().st_size / 1e6
         logger.info(f"    文件大小: {size_mb:.1f} MB")
 
-    # 获取输入文件
-    nifti_files = sorted(list(input_dir.glob("*_clean.nii.gz")))
-    trachea_files = sorted(list(mask_dir.glob("*_trachea_mask.nii.gz")))
+    # 获取输入文件（按文件名筛选对应相位）
+    all_nifti = sorted(list(input_dir.glob("*_clean.nii.gz")))
+    all_trachea = sorted(list(mask_dir.glob("*_trachea_mask.nii.gz")))
+    if use_expiration:
+        nifti_files   = [f for f in all_nifti   if '_exp' in f.stem]
+        trachea_files = [f for f in all_trachea  if '_exp' in f.stem]
+    else:
+        nifti_files   = [f for f in all_nifti   if '_exp' not in f.stem]
+        trachea_files = [f for f in all_trachea  if '_exp' not in f.stem]
 
     if not skip_template_build and len(nifti_files) < 5:
         logger.error(f"文件数不足: 需要至少 5 例，当前 {len(nifti_files)} 例")
@@ -618,6 +655,9 @@ def main():
   # 指定 GPU
   python run_phase2_pipeline.py --device cuda:0
 
+  # 使用呼气相数据流（文件名自动插入 _exp 中缀，目录不变）
+  python run_phase2_pipeline.py --expiration
+
   # 后台运行
   nohup python run_phase2_pipeline.py > logs/phase2.log 2>&1 &
         """
@@ -683,6 +723,14 @@ def main():
         '--config', type=str, default='config.yaml',
         help='配置文件路径（默认: config.yaml）'
     )
+    parser.add_argument(
+        '--expiration',
+        action='store_true',
+        default=False,
+        help='使用呼气相数据流（默认使用吸气相数据流）。\n'
+             '文件名自动插入 _exp 中缀（如 normal_001_exp.nii.gz），\n'
+             '与吸气相数据共享同一目录，不会覆盖任何吸气相文件。'
+    )
 
     args = parser.parse_args()
 
@@ -697,7 +745,10 @@ def main():
         logger.error(f"无法加载配置文件: {e}")
         sys.exit(1)
 
-    # 记录开始时间
+    # 呼气相模式：不修改任何目录路径，仅在各函数中通过文件名筛选区分相位
+    if args.expiration:
+        logger.info("[呼气相模式] 文件名中缀: '_exp'，目录路径不变")
+
     pipeline_start = time.time()
 
     # =========================================================================
@@ -797,6 +848,7 @@ def main():
     run_atlas_step = True
     skip_template_build = False
     extract_trachea = not args.no_trachea
+    use_expiration = args.expiration          # ← 呼气相标志
 
     if args.step1_only or args.skip_atlas:
         run_atlas_step = False
@@ -811,6 +863,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"配置文件: {args.config}")
+    logger.info(f"数据相位: {'呼气相 (--expiration)' if use_expiration else '吸气相（默认）'}")
     logger.info(f"肺叶分割模型: {args.lobe_model}")
     logger.info(f"气管树分割: {'是 (TotalSegmentator lung_vessels)' if extract_trachea else '否 (--no-trachea)'}")
     logger.info(f"执行分割: {'是' if run_segmentation_step else '否'}")
@@ -833,7 +886,8 @@ def main():
         sys.exit(0 if env_ok else 1)
 
     # Step 2: 数据验证
-    data_ok, _ = run_data_validation(config, logger, args.quick_test)
+    data_ok, _ = run_data_validation(config, logger, args.quick_test,
+                                     use_expiration=use_expiration)
     if not data_ok:
         logger.error("数据验证失败，退出")
         sys.exit(1)
@@ -847,7 +901,8 @@ def main():
             force=args.force,
             limit=args.limit,
             lobe_model=args.lobe_model,
-            extract_trachea=extract_trachea
+            extract_trachea=extract_trachea,
+            use_expiration=use_expiration,
         )
         if not seg_ok:
             logger.warning("分割过程有错误，继续执行")
@@ -858,7 +913,7 @@ def main():
             logger.info("跳过分割步骤（--skip-segmentation）")
 
     # Step 4: 质量检查
-    quality_ok, _ = run_quality_check(config, logger)
+    quality_ok, _ = run_quality_check(config, logger, use_expiration=use_expiration)
     if not quality_ok:
         logger.error("质量检查失败，退出")
         sys.exit(1)
@@ -868,7 +923,8 @@ def main():
         atlas_ok = run_atlas_construction(
             config, logger,
             quick_test=args.quick_test,
-            skip_template_build=skip_template_build
+            skip_template_build=skip_template_build,
+            use_expiration=use_expiration,
         )
         if not atlas_ok:
             logger.error("Atlas 构建失败")

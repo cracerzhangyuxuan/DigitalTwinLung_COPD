@@ -136,13 +136,20 @@ def check_pytorch() -> Tuple[bool, str]:
 # =============================================================================
 
 def setup_logging(log_dir: Path = None) -> logging.Logger:
-    """配置日志"""
+    """配置日志（强制 UTF-8，避免 Windows 终端乱码）"""
     if log_dir is None:
         log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"phase3_pipeline_{timestamp}.log"
+
+    # 强制 stdout 使用 UTF-8（Python 3.7+）
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
     # 创建 logger
     logger = logging.getLogger("Phase3Pipeline")
@@ -161,8 +168,11 @@ def setup_logging(log_dir: Path = None) -> logging.Logger:
     )
     file_handler.setFormatter(file_formatter)
 
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
+    # 控制台处理器（显式指定 sys.stdout + UTF-8）
+    console_stream = open(sys.stdout.fileno(), mode='w', encoding='utf-8',
+                          errors='replace', closefd=False) \
+        if hasattr(sys.stdout, 'fileno') else sys.stdout
+    console_handler = logging.StreamHandler(console_stream)
     console_handler.setLevel(logging.INFO)
     console_formatter = logging.Formatter('%(message)s')
     console_handler.setFormatter(console_formatter)
@@ -2002,6 +2012,9 @@ def main():
   # 生成可视化结果
   python run_phase3_pipeline.py --visualize --model-type unet
 
+  # 使用呼气相数据流（文件名自动插入 _exp 中缀，目录不变）
+  python run_phase3_pipeline.py --expiration
+
   # 跳过配准（使用已有结果）
   python run_phase3_pipeline.py --skip-registration
 
@@ -2093,6 +2106,14 @@ def main():
         '--config', type=str, default='config.yaml',
         help='配置文件路径（默认: config.yaml）'
     )
+    parser.add_argument(
+        '--expiration',
+        action='store_true',
+        default=False,
+        help='使用呼气相数据流（默认使用吸气相数据流）。\n'
+             '文件名自动插入 _exp 中缀（如 copd_001_exp_warped.nii.gz），\n'
+             '与吸气相数据共享同一目录，不会覆盖任何吸气相文件。'
+    )
 
     args = parser.parse_args()
 
@@ -2106,6 +2127,10 @@ def main():
     except Exception as e:
         logger.error(f"无法加载配置文件: {e}")
         sys.exit(1)
+
+    # 呼气相模式：不修改任何目录路径，仅在各函数中通过文件名筛选区分相位
+    if args.expiration:
+        logger.info("[呼气相模式] 文件名中缀: '_exp'，目录路径不变")
 
     # 覆盖配置（如果命令行指定）
     if args.output_dir:
@@ -2122,6 +2147,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"配置文件: {args.config}")
+    logger.info(f"数据相位: {'呼气相 (--expiration)' if args.expiration else '吸气相（默认）'}")
 
     atlas_dir = Path(config['paths']['atlas'])
     output_dir = Path(config['paths'].get('mapped', 'data/03_mapped'))

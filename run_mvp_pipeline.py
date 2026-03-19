@@ -42,24 +42,25 @@ def step1_dicom_to_nifti(config: dict):
     logger.info("=" * 60)
     logger.info("步骤 1: DICOM 转 NIfTI")
     logger.info("=" * 60)
-    
+
     from src.utils.io import load_dicom_series, save_nifti
     import numpy as np
-    
+
+    suffix = '_exp' if config.get('_use_expiration', False) else ''
     raw_dir = Path(config['paths']['raw_data'])
     cleaned_dir = Path(config['paths']['cleaned_data'])
-    
-    # 处理正常肺
+
+    # 处理正常肺（目录固定，文件名通过 suffix 区分相位）
     normal_input = raw_dir / 'normal'
     normal_output = cleaned_dir / 'normal_nifti'
     normal_output.mkdir(parents=True, exist_ok=True)
-    
+
     if normal_input.exists():
         subdirs = [d for d in normal_input.iterdir() if d.is_dir()]
         logger.info(f"找到 {len(subdirs)} 个正常肺 DICOM 目录")
-        
+
         for i, subdir in enumerate(subdirs, start=1):
-            output_path = normal_output / f"normal_{i:03d}.nii.gz"
+            output_path = normal_output / f"normal_{i:03d}{suffix}.nii.gz"
             try:
                 volume, metadata = load_dicom_series(subdir)
                 # 创建简单的仿射矩阵
@@ -70,18 +71,18 @@ def step1_dicom_to_nifti(config: dict):
                 logger.info(f"[{i}/{len(subdirs)}] {subdir.name} -> {output_path.name}")
             except Exception as e:
                 logger.error(f"转换失败 {subdir.name}: {e}")
-    
-    # 处理 COPD
+
+    # 处理 COPD（目录固定，文件名通过 suffix 区分相位）
     copd_input = raw_dir / 'copd'
     copd_output = cleaned_dir / 'copd_nifti'
     copd_output.mkdir(parents=True, exist_ok=True)
-    
+
     if copd_input.exists():
         subdirs = [d for d in copd_input.iterdir() if d.is_dir()]
         logger.info(f"找到 {len(subdirs)} 个 COPD DICOM 目录")
-        
+
         for i, subdir in enumerate(subdirs, start=1):
-            output_path = copd_output / f"copd_{i:03d}.nii.gz"
+            output_path = copd_output / f"copd_{i:03d}{suffix}.nii.gz"
             try:
                 volume, metadata = load_dicom_series(subdir)
                 spacing = metadata.get('PixelSpacing', [1.0, 1.0])
@@ -91,7 +92,7 @@ def step1_dicom_to_nifti(config: dict):
                 logger.info(f"[{i}/{len(subdirs)}] {subdir.name} -> {output_path.name}")
             except Exception as e:
                 logger.error(f"转换失败 {subdir.name}: {e}")
-    
+
     logger.info("步骤 1 完成!")
 
 
@@ -106,8 +107,8 @@ def step2_lung_segmentation(config: dict):
     batch_segment_lungs = simple_lung_segment.batch_segment_lungs
 
     cleaned_dir = Path(config['paths']['cleaned_data'])
-    
-    # 分割正常肺
+
+    # 分割正常肺（目录固定，吸气相/呼气相文件共存于同一目录）
     normal_nifti = cleaned_dir / 'normal_nifti'
     if normal_nifti.exists():
         logger.info("分割正常肺...")
@@ -116,7 +117,7 @@ def step2_lung_segmentation(config: dict):
             mask_output_dir=cleaned_dir / 'normal_mask',
             clean_output_dir=cleaned_dir / 'normal_clean'
         )
-    
+
     # 分割 COPD
     copd_nifti = cleaned_dir / 'copd_nifti'
     if copd_nifti.exists():
@@ -126,7 +127,7 @@ def step2_lung_segmentation(config: dict):
             mask_output_dir=cleaned_dir / 'copd_mask',
             clean_output_dir=cleaned_dir / 'copd_clean'
         )
-    
+
     logger.info("步骤 2 完成!")
 
 
@@ -149,12 +150,18 @@ def step3_extract_emphysema(config: dict):
     min_size = config.get('preprocessing', {}).get('min_lesion_size', 100)
 
     copd_clean_dir = cleaned_dir / 'copd_clean'
-    copd_mask_dir = cleaned_dir / 'copd_mask'
-    emphysema_dir = cleaned_dir / 'copd_emphysema'
+    copd_mask_dir  = cleaned_dir / 'copd_mask'
+    emphysema_dir  = cleaned_dir / 'copd_emphysema'
     emphysema_dir.mkdir(parents=True, exist_ok=True)
 
     if copd_clean_dir.exists():
-        ct_files = list(copd_clean_dir.glob("*.nii.gz"))
+        # 按文件名筛选对应相位
+        all_ct = list(copd_clean_dir.glob("*.nii.gz"))
+        use_exp = config.get('_use_expiration', False)
+        if use_exp:
+            ct_files = [f for f in all_ct if '_exp' in f.stem]
+        else:
+            ct_files = [f for f in all_ct if '_exp' not in f.stem]
         logger.info(f"找到 {len(ct_files)} 个 COPD CT 文件")
 
         for ct_path in ct_files:
@@ -205,15 +212,21 @@ def step4_create_template(config: dict):
     cleaned_dir = Path(config['paths']['cleaned_data'])
     atlas_dir = Path(config['paths']['atlas'])
     atlas_dir.mkdir(parents=True, exist_ok=True)
-    
+
     template_path = atlas_dir / 'temp_template.nii.gz'
     template_mask_path = atlas_dir / 'temp_template_mask.nii.gz'
-    
+
     normal_clean_dir = cleaned_dir / 'normal_clean'
-    normal_mask_dir = cleaned_dir / 'normal_mask'
-    
+    normal_mask_dir  = cleaned_dir / 'normal_mask'
+
     if normal_clean_dir.exists():
-        ct_files = sorted(normal_clean_dir.glob("*.nii.gz"))
+        # 按文件名筛选对应相位
+        all_ct = sorted(normal_clean_dir.glob("*.nii.gz"))
+        use_exp = config.get('_use_expiration', False)
+        if use_exp:
+            ct_files = [f for f in all_ct if '_exp' in f.stem]
+        else:
+            ct_files = [f for f in all_ct if '_exp' not in f.stem]
         if ct_files:
             # 使用第一个正常肺作为模板
             src_ct = ct_files[0]
@@ -243,21 +256,27 @@ def step5_register_copd(config: dict):
     register_copd_to_template = register_sitk.register_copd_to_template
 
     cleaned_dir = Path(config['paths']['cleaned_data'])
-    atlas_dir = Path(config['paths']['atlas'])
-    mapped_dir = Path(config['paths']['mapped'])
+    atlas_dir   = Path(config['paths']['atlas'])
+    mapped_dir  = Path(config['paths']['mapped'])
     mapped_dir.mkdir(parents=True, exist_ok=True)
-    
+
     template_path = atlas_dir / 'temp_template.nii.gz'
-    
+
     if not template_path.exists():
         logger.error(f"模板不存在: {template_path}")
         return
-    
+
     copd_clean_dir = cleaned_dir / 'copd_clean'
-    emphysema_dir = cleaned_dir / 'copd_emphysema'
-    
+    emphysema_dir  = cleaned_dir / 'copd_emphysema'
+
     if copd_clean_dir.exists():
-        ct_files = list(copd_clean_dir.glob("*.nii.gz"))
+        # 按文件名筛选对应相位
+        all_ct = list(copd_clean_dir.glob("*.nii.gz"))
+        use_exp = config.get('_use_expiration', False)
+        if use_exp:
+            ct_files = [f for f in all_ct if '_exp' in f.stem]
+        else:
+            ct_files = [f for f in all_ct if '_exp' not in f.stem]
         logger.info(f"找到 {len(ct_files)} 个 COPD CT 文件")
         
         for ct_path in ct_files:
@@ -339,13 +358,38 @@ def step6_visualize(config: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MVP 流水线")
+    parser = argparse.ArgumentParser(
+        description="MVP 流水线",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用方法:
+  python run_mvp_pipeline.py --all          # 运行全部步骤（吸气相）
+  python run_mvp_pipeline.py --step 1       # 只运行步骤1
+  python run_mvp_pipeline.py --step 1,2,3   # 运行步骤1-3
+  python run_mvp_pipeline.py --all --expiration  # 使用呼气相数据流
+        """
+    )
     parser.add_argument('--all', action='store_true', help='运行全部步骤')
     parser.add_argument('--step', type=str, help='运行指定步骤 (如: 1 或 1,2,3)')
+    parser.add_argument(
+        '--expiration',
+        action='store_true',
+        default=False,
+        help='使用呼气相数据流（默认使用吸气相数据流）。\n'
+             '文件名自动插入 _exp 中缀（如 normal_001_exp.nii.gz），\n'
+             '与吸气相数据共享同一目录，不会覆盖任何吸气相文件。'
+    )
     args = parser.parse_args()
-    
+
     config = load_config()
-    
+
+    # 呼气相模式：不修改任何目录路径，仅在各函数中通过文件名筛选区分相位
+    if args.expiration:
+        config['_use_expiration'] = True
+        logger.info("[呼气相模式] 文件名中缀: '_exp'，目录路径不变")
+    else:
+        config['_use_expiration'] = False
+
     steps = {
         1: ("DICOM 转 NIfTI", step1_dicom_to_nifti),
         2: ("肺部分割", step2_lung_segmentation),
@@ -354,7 +398,7 @@ def main():
         5: ("COPD 配准", step5_register_copd),
         6: ("可视化验证", step6_visualize),
     }
-    
+
     if args.all:
         for step_num, (name, func) in steps.items():
             func(config)
@@ -371,6 +415,7 @@ def main():
         print("  python run_mvp_pipeline.py --all          # 运行全部步骤")
         print("  python run_mvp_pipeline.py --step 1       # 只运行步骤1")
         print("  python run_mvp_pipeline.py --step 1,2,3   # 运行步骤1-3")
+        print("  python run_mvp_pipeline.py --all --expiration  # 呼气相模式")
         print("\n可用步骤:")
         for num, (name, _) in steps.items():
             print(f"  {num}: {name}")

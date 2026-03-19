@@ -50,9 +50,15 @@ def setup_logger(
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # 控制台输出
+    # 控制台输出（显式 UTF-8，避免 Windows CP936 乱码）
     if console:
-        console_handler = logging.StreamHandler(sys.stdout)
+        try:
+            console_stream = open(sys.stdout.fileno(), mode='w',
+                                  encoding='utf-8', errors='replace',
+                                  closefd=False)
+        except Exception:
+            console_stream = sys.stdout
+        console_handler = logging.StreamHandler(console_stream)
         console_handler.setLevel(level)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
