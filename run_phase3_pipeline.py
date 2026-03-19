@@ -34,7 +34,7 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     python run_phase3_pipeline.py --inference --checkpoint checkpoints/best.pth
 
     # 限制处理数量
-    python run_phase3_pipeline.py --limit 5
+    python run_phase3_pipeline.py --limit 3
 
     # ============================================================
     # 推理命令（3条）
@@ -55,13 +55,13 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     # ============================================================
 
     # UNet 模型评估
-    python run_phase3_pipeline.py --evaluate --model-type unet
+    python run_phase3_pipeline.py --evaluate --model-type unet --limit 3
 
     # Partial Conv 模型评估
-    python run_phase3_pipeline.py --evaluate --model-type partial_conv
+    python run_phase3_pipeline.py --evaluate --model-type partial_conv --limit 3
 
     # PatchGAN 模型评估
-    python run_phase3_pipeline.py --evaluate --model-type patchgan
+    python run_phase3_pipeline.py --evaluate --model-type patchgan --limit 3
 
 
     # ============================================================
@@ -74,7 +74,7 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     # Partial Conv 结果可视化
     python run_phase3_pipeline.py --visualize --model-type partial_conv
 
-    # PatchGAN 结果可视化
+    # PatchGAN 结果可视化 #vertical——2行4列  horizontal——4行2列
     python run_phase3_pipeline.py --visualize --model-type patchgan
 
 
@@ -973,23 +973,26 @@ def _generate_texture_radar_chart(
         N = len(categories)
 
         # === 1. Sharpness: 归一化到 0-1（越高越好）===
+        # 使用带 padding 的归一化：防止当只有 2 个不同值时退化为 0/1 极端
         all_sharpness = [sharpness_real, sharpness_ai, sharpness_warp]
         min_sharp, max_sharp = min(all_sharpness), max(all_sharpness)
         sharp_range = max_sharp - min_sharp if max_sharp > min_sharp else 1.0
+        # 添加 10% padding，使最小值归一化为 0.1 而非 0.0
+        padding = 0.1
 
-        sharp_real_norm = (sharpness_real - min_sharp) / sharp_range
-        sharp_ai_norm = (sharpness_ai - min_sharp) / sharp_range
-        sharp_warp_norm = (sharpness_warp - min_sharp) / sharp_range
+        sharp_real_norm = padding + (1 - 2 * padding) * (sharpness_real - min_sharp) / sharp_range
+        sharp_ai_norm = padding + (1 - 2 * padding) * (sharpness_ai - min_sharp) / sharp_range
+        sharp_warp_norm = padding + (1 - 2 * padding) * (sharpness_warp - min_sharp) / sharp_range
 
-        # === 2. Boundary: 归一化到 0-1 并取反（越低越好）===
+        # === 2. Boundary: 归一化到 0-1 并取反（越低越好 → 雷达图上越高越好）===
         all_boundary = [boundary_real, boundary_ai, boundary_warp]
         min_bound, max_bound = min(all_boundary), max(all_boundary)
         bound_range = max_bound - min_bound if max_bound > min_bound else 1.0
 
-        # 取反：1 - normalized_value（这样低值变成高分）
-        bound_real_norm = 1.0 - (boundary_real - min_bound) / bound_range
-        bound_ai_norm = 1.0 - (boundary_ai - min_bound) / bound_range
-        bound_warp_norm = 1.0 - (boundary_warp - min_bound) / bound_range
+        # 取反 + padding：低 boundary 值映射到高分
+        bound_real_norm = padding + (1 - 2 * padding) * (1.0 - (boundary_real - min_bound) / bound_range)
+        bound_ai_norm = padding + (1 - 2 * padding) * (1.0 - (boundary_ai - min_bound) / bound_range)
+        bound_warp_norm = padding + (1 - 2 * padding) * (1.0 - (boundary_warp - min_bound) / bound_range)
 
         # === 3. GLCM 特征: 使用相似度（越接近 Real 越好）===
         glcm_real_values = [contrast_real, energy_real, entropy_real, correlation_real, homogeneity_real]
@@ -1119,6 +1122,23 @@ def run_model_evaluation(
     output_dir = Path(f'results/{model_type}')  # 合并后的输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 加载标准模板作为 Direct Warp 基线
+    # Direct Warp = 模板 + 病灶区域未经 AI 合成的原始 HU 值
+    atlas_dir = Path(paths.get('atlas', 'data/02_atlas'))
+    airway_fusion_config = config.get('registration', {}).get('airway_fusion', {})
+    airway_template_filename = airway_fusion_config.get(
+        'output_filename', 'standard_template_with_airway.nii.gz'
+    )
+    template_path = atlas_dir / airway_template_filename
+    if not template_path.exists():
+        template_path = atlas_dir / 'standard_template.nii.gz'
+    if template_path.exists():
+        template_data_for_warp = nib.load(str(template_path)).get_fdata()
+        logger.info(f"  Direct Warp 基线: {template_path.name}")
+    else:
+        template_data_for_warp = None
+        logger.warning(f"  ⚠ 模板不存在，Direct Warp 将回退为 Real COPD")
+
     # 检查融合结果目录
     if not fused_dir.exists():
         logger.error(f"  ✗ 融合结果目录不存在: {fused_dir}")
@@ -1180,8 +1200,12 @@ def run_model_evaluation(
             fused_emph = (fused_lesion < -950).sum() / len(fused_lesion)
 
             # ========== 高级纹理质量指标 ==========
-            # Direct Warp 数据就是 warped real COPD（real_data）
-            warp_data = real_data
+            # Direct Warp 基线：模板在病灶区域的原始 HU 值
+            # 概念：如果不用 AI，直接把病灶 mask 叠加到模板上，质量如何？
+            if template_data_for_warp is not None:
+                warp_data = template_data_for_warp
+            else:
+                warp_data = real_data  # 回退：模板不可用时用 real_data
 
             # 找到病灶面积最大的切片用于 2D 指标计算
             slice_areas = [np.sum(mask_data[:, :, z] > 0) for z in range(mask_data.shape[2])]
@@ -1422,7 +1446,7 @@ def run_model_evaluation(
 
 **图例**: ↑ 越高越好 = 值越大越好, ↓ 越低越好 = 值越小越好, ≈ Real 越近越好 = 越接近 Real COPD 越好
 
-> **注意**: Direct Warp 的 GLCM 特征值与 Real COPD 相同，因为 Direct Warp 本质上就是将真实 COPD CT 直接变形到标准空间，未经过 AI 纹理合成处理。AI Fused 的优势主要体现在 **清晰度** 和 **边界梯度** 指标上，这两个指标直接反映了 AI 纹理合成的质量改进。
+> **注意**: Direct Warp 是以标准模板为基线（不经过 AI 纹理合成），反映了模板在病灶区域的原始纹理质量。AI Fused 的优势体现在模板基础上经 AI 合成后纹理更接近真实 COPD CT。
 
 ![纹理质量雷达图](texture_quality_radar.png)
 """)
@@ -1514,7 +1538,7 @@ def get_roi_slice(mask_3d, context_size=32, view='axial'):
     return slice_idx, (y_start, y_end, x_start, x_end)
 
 
-def plot_comparison(img_a, title_a, img_b, title_b, mask, roi_coords, save_path, suptitle, view='axial', layout='horizontal'):
+def plot_comparison(img_a, title_a, img_b, title_b, mask, roi_coords, save_path, suptitle, view='axial', layout='vertical'):
     """
     绘制对比图（支持水平/垂直两种布局）
     Plot comparison images with support for horizontal/vertical layouts

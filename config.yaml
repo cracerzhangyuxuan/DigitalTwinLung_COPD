@@ -154,13 +154,15 @@ registration:
       rho: 0.01        # 岭惩罚，增加鲁棒性
       r_search: 3      # 搜索半径
 
-  # 气管树融合参数（2025-12-31 新增）
+  # 气管树融合参数（2025-12-31 新增，2026-02 修复壁-腔双层算法）
   airway_fusion:
     enabled: true                    # 是否启用气管树融合
-    airway_hu: -995.0                # 气道 HU 值（真实气道约 -1000 到 -950）
+    airway_hu: -995.0                # 气腔 HU 值（管内空气，真实气道约 -1000 到 -950）
+    wall_hu: -400.0                  # 气道壁 HU 值（软组织管壁，真实气道壁约 -300 到 0）
+    wall_thickness: 1                # 气道壁厚度（体素数）
     boundary_sigma: 0.8              # 边界平滑高斯 sigma
     boundary_width: 2                # 边界羽化宽度（体素数）
-    preserve_existing_low_hu: true   # 保留模板中已有的低 HU 区域
+    preserve_existing_low_hu: true   # 已弃用，保留以兼容旧配置
     # 输出文件名
     output_filename: "standard_template_with_airway.nii.gz"
 
