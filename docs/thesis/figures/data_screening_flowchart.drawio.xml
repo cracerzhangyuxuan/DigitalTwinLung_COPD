@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2025-01-01T00:00:00.000Z" agent="thesis" version="24.0.0" type="device">
+  <diagram id="data-screening-flow" name="数据筛选流程图">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- 数据源层 -->
+        <mxCell id="src1" value="LIDC-IDRI 公开数据集&#xa;1018例胸部CT&#xa;(7所医疗中心, 4种设备品牌)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="50" y="30" width="240" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="src2" value="广医一院合作数据集&#xa;389例COPD相关受试者&#xa;(双相CT + 193维临床表型)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="350" y="30" width="260" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- 合并箭头 -->
+        <mxCell id="e_src" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="src2" target="s1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- 步骤1: 缺失值过滤 -->
+        <mxCell id="s1" value="缺失值过滤&#xa;(年龄/性别/身高/体重非空)" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="370" y="140" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_out" value="排除 77例 (缺失关键字段)" style="text;fontSize=10;fontColor=#999999;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="600" y="148" width="200" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1_n" value="312例" style="text;fontSize=11;fontStyle=1;fontColor=#333333;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="445" y="192" width="60" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- 步骤2: DBSCAN+LOF聚类筛选 -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" parent="1" source="s1" target="s2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2" value="DBSCAN + LOF 联合聚类筛选&#xa;(ε=0.70, min_samples=5, contamination=0.10)&#xa;特征空间: 年龄 × 性别 × 身高 × 体重" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="330" y="230" width="300" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2_out" value="排除 43例 (体型极端离群点)" style="text;fontSize=10;fontColor=#999999;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="640" y="248" width="200" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2_n" value="269例" style="text;fontSize=11;fontStyle=1;fontColor=#333333;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="445" y="297" width="60" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- 步骤3: 性别筛选 -->
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" parent="1" source="s2" target="s3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3" value="性别筛选&#xa;(仅保留男性)" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="390" y="335" width="180" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3_out" value="排除 26例 (女性)" style="text;fontSize=10;fontColor=#999999;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="580" y="343" width="150" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3_n" value="243例" style="text;fontSize=11;fontStyle=1;fontColor=#333333;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="445" y="382" width="60" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- 步骤4: GOLD均衡采样 -->
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" parent="1" source="s3" target="s4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4" value="GOLD分级均衡采样&#xa;(H:非H = 1:1, 目标80例)" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="370" y="420" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4_detail" value="H=40 | G1=4 | G2=22 | G3=9 | G4=5" style="text;fontSize=10;fontColor=#666666;align=center;verticalAlign=middle;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="365" y="472" width="230" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- 分支: H级 和 非H级 -->
+        <mxCell id="e4a" style="edgeStyle=orthogonalEdgeStyle;rounded=0;exitX=0.3;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="s4" target="s5a">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4b" style="edgeStyle=orthogonalEdgeStyle;rounded=0;exitX=0.7;exitY=1;exitDx=0;exitDy=0;" edge="1" parent="1" source="s4" target="s5b">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s5a" value="H级 (健康对照)&#xa;双相CT可用性验证" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="220" y="510" width="190" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s5a_out" value="3例CT缺失" style="text;fontSize=10;fontColor=#999999;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="130" y="520" width="85" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="s5b" value="非H级 (COPD G1-G4)&#xa;双相CT可用性验证" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="550" y="510" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s5b_out" value="11例CT缺失" style="text;fontSize=10;fontColor=#999999;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="760" y="520" width="90" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- LIDC补充箭头 -->
+        <mxCell id="e_lidc" style="edgeStyle=orthogonalEdgeStyle;rounded=0;dashed=1;strokeColor=#6c8ebf;" edge="1" parent="1" source="src1" target="s5a">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="170" y="110"/>
+              <mxPoint x="170" y="535"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="lidc_label" value="少量补充" style="text;fontSize=9;fontColor=#6c8ebf;fontStyle=2;align=center;" vertex="1" parent="1">
+          <mxGeometry x="115" y="440" width="60" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- 最终结果 -->
+        <mxCell id="e5a" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" parent="1" source="s5a" target="r1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5b" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" parent="1" source="s5b" target="r2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="r1" value="37例健康受试者&#xa;双相CT (吸气+呼气)&#xa;→ 标准图谱构建 (第三章)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="195" y="600" width="240" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="r2" value="29例COPD患者&#xa;双相CT (吸气+呼气)&#xa;→ 病灶映射与生成 (第四章)" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;verticalAlign=middle;align=center;" vertex="1" parent="1">
+          <mxGeometry x="525" y="600" width="250" height="65" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+

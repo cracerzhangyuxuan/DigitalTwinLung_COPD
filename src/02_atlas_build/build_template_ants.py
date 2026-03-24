@@ -1666,7 +1666,9 @@ def main(
     num_images: Optional[int] = None,
     skip_evaluation: bool = False,
     quick_test: bool = False,
-    skip_template_build: bool = False
+    skip_template_build: bool = False,
+    use_expiration: bool = False,
+    filename_suffix: Optional[str] = None
 ) -> Dict:
     """
     主函数 - 从配置运行完整的 Atlas 构建流程
@@ -1677,6 +1679,8 @@ def main(
         skip_evaluation: 是否跳过质量评估步骤
         quick_test: 快速测试模式（使用较少迭代和图像）
         skip_template_build: 是否跳过 Step 1（模板构建），直接从 Step 2 开始
+        use_expiration: 是否使用呼气相数据流
+        filename_suffix: 输出文件名后缀，默认呼气相为 _exp
 
     Returns:
         result: 包含模板路径、mask 路径、验证结果等
@@ -1695,6 +1699,10 @@ def main(
     # 获取配置
     atlas_config = config.get('registration', {}).get('template_build', {})
     paths_config = config.get('paths', {})
+    suffix = filename_suffix if filename_suffix is not None else ('_exp' if use_expiration else '')
+
+    def _phase_match(path: Path) -> bool:
+        return ('_exp' in path.stem) if use_expiration else ('_exp' not in path.stem)
 
     # 输入路径
     input_dir = Path(paths_config.get('cleaned_data', 'data/01_cleaned')) / 'normal_clean'
@@ -1704,31 +1712,42 @@ def main(
     output_dir = Path(paths_config.get('atlas', 'data/02_atlas'))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    template_path = output_dir / 'standard_template.nii.gz'
-    mask_path = output_dir / 'standard_mask.nii.gz'
-    trachea_path = output_dir / 'standard_trachea_mask.nii.gz'
-    lobes_path = output_dir / 'standard_lung_lobes_labeled.nii.gz'
-    report_path = output_dir / 'atlas_evaluation_report.json'
+    template_path = output_dir / f'standard_template{suffix}.nii.gz'
+    mask_path = output_dir / f'standard_mask{suffix}.nii.gz'
+    trachea_path = output_dir / f'standard_trachea_mask{suffix}.nii.gz'
+    lobes_path = output_dir / f'standard_lung_lobes_labeled{suffix}.nii.gz'
+    report_path = output_dir / f'atlas_evaluation_report{suffix}.json'
 
-    # 获取所有输入图像
-    image_paths = sorted(list(input_dir.glob('*.nii.gz')))
+    # 获取所有输入图像（严格按相位过滤，避免吸/呼气混用）
+    image_paths = [p for p in sorted(input_dir.glob('*.nii.gz')) if _phase_match(p)]
 
     # 获取肺部 mask（排除气管树 mask 和肺叶标签 mask）
     # 肺部 mask 命名格式: *_mask.nii.gz（不包含 trachea 或 lung_lobes）
     all_mask_files = sorted(list(mask_dir.glob('*_mask.nii.gz'))) if mask_dir.exists() else []
-    mask_paths = [p for p in all_mask_files
-                  if not p.name.endswith('_trachea_mask.nii.gz')
-                  and 'lung_lobes' not in p.name]
+    mask_paths = [
+        p for p in all_mask_files
+        if _phase_match(p)
+        and not p.name.endswith('_trachea_mask.nii.gz')
+        and 'lung_lobes' not in p.name
+    ]
 
     # 获取气管树 mask（如果存在）
-    trachea_mask_paths = sorted(list(mask_dir.glob('*_trachea_mask.nii.gz'))) if mask_dir.exists() else []
+    trachea_mask_paths = [
+        p for p in sorted(mask_dir.glob('*_trachea_mask.nii.gz'))
+        if _phase_match(p)
+    ] if mask_dir.exists() else []
 
     # 获取肺叶标签 mask（如果存在）
-    lobes_mask_paths = sorted(list(mask_dir.glob('*_lung_lobes_labeled.nii.gz'))) if mask_dir.exists() else []
+    lobes_mask_paths = [
+        p for p in sorted(mask_dir.glob('*_lung_lobes_labeled.nii.gz'))
+        if _phase_match(p)
+    ] if mask_dir.exists() else []
 
     logger.info("=" * 70)
     logger.info("Phase 2: Atlas Construction - 标准底座构建")
     logger.info("=" * 70)
+    logger.info(f"数据相位: {'呼气相' if use_expiration else '吸气相'}")
+    logger.info(f"文件后缀: {suffix or '(无)'}")
     logger.info(f"输入目录: {input_dir}")
     logger.info(f"Mask 目录: {mask_dir}")
     logger.info(f"发现 {len(image_paths)} 个输入图像")
@@ -1945,7 +1964,9 @@ def main(
             logger.warning(f"质量评估失败: {e}")
 
     # 运行完整质量检查
-    quality_check_result = run_all_quality_checks(output_dir)
+    quality_check_dir = output_dir if not suffix else output_dir / f'quality_checks{suffix}'
+    quality_check_dir.mkdir(parents=True, exist_ok=True)
+    quality_check_result = run_all_quality_checks(quality_check_dir)
 
     total_elapsed = time.time() - total_start
 

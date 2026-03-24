@@ -389,6 +389,10 @@ def main():
         help='输出路径'
     )
     parser.add_argument(
+        '--suffix', type=str, default='',
+        help='文件名后缀。示例：--suffix _exp 将自动映射到 *_exp.nii.gz'
+    )
+    parser.add_argument(
         '--airway-hu', type=float, default=-995.0,
         help='气腔 HU 值（默认 -995，模拟管内空气）'
     )
@@ -411,10 +415,18 @@ def main():
 
     args = parser.parse_args()
 
+    template_path = args.template
+    trachea_path = args.trachea
+    output_path_arg = args.output
+    if args.suffix:
+        template_path = f"data/02_atlas/standard_template{args.suffix}.nii.gz"
+        trachea_path = f"data/02_atlas/standard_trachea_mask{args.suffix}.nii.gz"
+        output_path_arg = f"data/02_atlas/standard_template_with_airway{args.suffix}.nii.gz"
+
     output_path = fuse_airway_to_template(
-        template_path=args.template,
-        trachea_mask_path=args.trachea,
-        output_path=args.output,
+        template_path=template_path,
+        trachea_mask_path=trachea_path,
+        output_path=output_path_arg,
         airway_hu=args.airway_hu,
         wall_hu=args.wall_hu,
         wall_thickness=args.wall_thickness,
@@ -423,9 +435,9 @@ def main():
 
     if args.verify:
         verify_fusion(
-            original_template_path=args.template,
+            original_template_path=template_path,
             fused_template_path=output_path,
-            trachea_mask_path=args.trachea
+            trachea_mask_path=trachea_path
         )
 
 

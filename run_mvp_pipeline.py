@@ -212,9 +212,10 @@ def step4_create_template(config: dict):
     cleaned_dir = Path(config['paths']['cleaned_data'])
     atlas_dir = Path(config['paths']['atlas'])
     atlas_dir.mkdir(parents=True, exist_ok=True)
+    suffix = '_exp' if config.get('_use_expiration', False) else ''
 
-    template_path = atlas_dir / 'temp_template.nii.gz'
-    template_mask_path = atlas_dir / 'temp_template_mask.nii.gz'
+    template_path = atlas_dir / f'temp_template{suffix}.nii.gz'
+    template_mask_path = atlas_dir / f'temp_template_mask{suffix}.nii.gz'
 
     normal_clean_dir = cleaned_dir / 'normal_clean'
     normal_mask_dir  = cleaned_dir / 'normal_mask'
@@ -259,8 +260,9 @@ def step5_register_copd(config: dict):
     atlas_dir   = Path(config['paths']['atlas'])
     mapped_dir  = Path(config['paths']['mapped'])
     mapped_dir.mkdir(parents=True, exist_ok=True)
+    suffix = '_exp' if config.get('_use_expiration', False) else ''
 
-    template_path = atlas_dir / 'temp_template.nii.gz'
+    template_path = atlas_dir / f'temp_template{suffix}.nii.gz'
 
     if not template_path.exists():
         logger.error(f"模板不存在: {template_path}")
@@ -324,7 +326,8 @@ def step6_visualize(config: dict):
     final_viz_dir = Path(config['paths']['final_viz'])
     final_viz_dir.mkdir(parents=True, exist_ok=True)
     
-    template_path = atlas_dir / 'temp_template.nii.gz'
+    suffix = '_exp' if config.get('_use_expiration', False) else ''
+    template_path = atlas_dir / f'temp_template{suffix}.nii.gz'
     
     # 渲染每个配准后的 COPD
     if mapped_dir.exists():

@@ -364,7 +364,7 @@ def render_comparison(
         lung_mesh = create_lung_mesh(ct_data, spacing)
         
         plotter.add_mesh(lung_mesh, color='gray', opacity=0.5)
-        plotter.add_text(title, font_size=12)
+        plotter.add_text(title, font_size=24)
         plotter.camera_position = 'xy'
     
     if output_path is not None:
@@ -823,8 +823,8 @@ def generate_slice_visualization(
     prefix: str = "template",
     window_center: float = -600,
     window_width: float = 1500,
-    figsize: Tuple[int, int] = (10, 10),
-    dpi: int = 150,
+    figsize: Tuple[int, int] = (12, 12),
+    dpi: int = 300,
     cmap: str = "gray"
 ) -> List[Path]:
     """
@@ -938,18 +938,22 @@ def generate_slice_visualization(
 
         # 添加颜色条
         cbar = plt.colorbar(im, ax=ax, shrink=0.8, label='HU')
+        cbar.ax.tick_params(labelsize=12)
+        cbar.set_label('HU', size=14)
 
         # 添加标题和标签
-        ax.set_title(f"{info['title']}\nSlice {center_idx}/{data.shape[axis]}", fontsize=14)
-        ax.set_xlabel(info['xlabel'], fontsize=11)
-        ax.set_ylabel(info['ylabel'], fontsize=11)
+        ax.set_title(f"{info['title']}\nSlice {center_idx}/{data.shape[axis]}", fontsize=20, fontweight='bold')
+        ax.set_xlabel(info['xlabel'], fontsize=16)
+        ax.set_ylabel(info['ylabel'], fontsize=16)
+        ax.tick_params(axis='both', which='major', labelsize=14)
 
         # 添加窗宽窗位信息
         ax.text(
             0.02, 0.98,
             f"Window: C={window_center:.0f} W={window_width:.0f}",
             transform=ax.transAxes,
-            fontsize=9,
+            fontsize=14,
+            fontweight='bold',
             verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
         )
@@ -958,7 +962,7 @@ def generate_slice_visualization(
 
         # 保存
         output_path = output_dir / f"{prefix}_{info['name']}.png"
-        plt.savefig(output_path, bbox_inches='tight', facecolor='white', edgecolor='none')
+        plt.savefig(output_path, bbox_inches='tight', facecolor='white', edgecolor='none', dpi=dpi)
         plt.close(fig)
 
         output_paths.append(output_path)

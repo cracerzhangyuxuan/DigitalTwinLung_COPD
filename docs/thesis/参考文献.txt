@@ -1,0 +1,28 @@
+GRIEVES M. Digital twin: manufacturing excellence through virtual factory replication[R]. White Paper, 2014: 1-7.
+CORRAL-ACERO J, MARGARA F, MARCINIAK M, et al. The "Digital Twin" to enable the vision of precision cardiology[J]. European Heart Journal, 2020, 41(48): 4556-4564.
+BAILLARGEON B, REBELO N, FOX D D, et al. The living heart project: a robust and integrative simulator for human heart function[J]. European Journal of Mechanics-A/Solids, 2014, 48: 38-47.
+TAWHAI M H, LIN C L. Image-based modeling of lung structure and function[J]. Journal of Magnetic Resonance Imaging, 2010, 32(6): 1421-1431.
+World Health Organization. The top 10 causes of death[EB/OL]. WHO Fact Sheets, 2020. https://www.who.int/news-room/fact-sheets/detail/the-top-10-causes-of-death.
+WANG C, XU J, YANG L, et al. Prevalence and risk factors of chronic obstructive pulmonary disease in China (the China Pulmonary Health [CPH] study): a national cross-sectional study[J]. The Lancet, 2018, 391(10131): 1706-1717.
+AVANTS B B, EPSTEIN C L, GROSSMAN M, et al. Symmetric diffeomorphic image registration with cross-correlation: evaluating automated labeling of elderly and neurodegenerative brain[J]. Medical Image Analysis, 2008, 12(1): 26-41.
+MURPHY K, VAN GINNEKEN B, REINHARDT J M, et al. Evaluation of registration methods on thoracic CT: the EMPIRE10 challenge[J]. IEEE Transactions on Medical Imaging, 2011, 30(11): 1901-1920.
+WASSERTHAL J, BREIT H C, MEYER M T, et al. TotalSegmentator: robust segmentation of 104 anatomic structures in CT images[J]. Radiology: Artificial Intelligence, 2023, 5(5): e230024.
+HOFMANNINGER J, PRAYER F, PAN J, et al. Automatic lung segmentation in routine imaging is primarily a data diversity problem, not a methodology problem[J]. European Radiology Experimental, 2020, 4(1): 1-13.
+PATHAK D, KRAHENBUHL P, DONAHUE J, et al. Context encoders: feature learning by inpainting[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR). 2016: 2536-2544.
+LIU G, REDA F A, SHIH K J, et al. Image inpainting for irregular holes using partial convolutions[C]//Proceedings of the European Conference on Computer Vision (ECCV). 2018: 89-105.
+ISOLA P, ZHU J Y, ZHOU T, et al. Image-to-image translation with conditional adversarial networks[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR). 2017: 1125-1134.
+LORENSEN W E, CLINE H E. Marching cubes: a high resolution 3D surface construction algorithm[J]. ACM SIGGRAPH Computer Graphics, 1987, 21(4): 163-169.
+MAX N. Optical models for direct volume rendering[J]. IEEE Transactions on Visualization and Computer Graphics, 1995, 1(2): 99-108.
+KNISS J, KINDLMANN G, HANSEN C. Interactive volume rendering using multi-dimensional transfer functions and direct manipulation widgets[C]//Proceedings of the IEEE Visualization Conference (VIS). 2001: 255-262.
+BEG M F, MILLER M I, TROUVE A, et al. Computing large deformation metric mappings via geodesic flows of diffeomorphisms[J]. International Journal of Computer Vision, 2005, 61(2): 139-157.
+ARMATO S G, MCLENNAN G, BIDAUT L, et al. The lung image database consortium (LIDC) and image database resource initiative (IDRI): a completed reference database of lung nodules on CT scans[J]. Medical Physics, 2011, 38(2): 915-931.
+AVANTS B B, TUSTISON N J, SONG G, et al. A reproducible evaluation of ANTs similarity metric performance in brain image registration[J]. NeuroImage, 2011, 54(3): 2033-2044.
+KLEIN A, ANDERSSON J, ARDEKANI B A, et al. Evaluation of 14 nonlinear deformation algorithms applied to human brain MRI registration[J]. NeuroImage, 2009, 46(3): 786-802.
+FRANGI A F, NIESSEN W J, VINCKEN K L, et al. Multiscale vessel enhancement filtering[C]//International Conference on Medical Image Computing and Computer-Assisted Intervention (MICCAI). 1998: 130-137.
+VILLANI C. Optimal transport: old and new[M]. Berlin Heidelberg: Springer-Verlag, 2009.
+TUSTISON N J, COOK P A, HOLBROOK A J, et al. The ANTsX ecosystem for quantitative biological and medical imaging[J]. Scientific Reports, 2021, 11(1): 9068.
+国内某合作三甲医院呼吸疾病国家重点实验室. COPD患者呼吸双相CT影像及临床表型数据集（内部合作数据）[Z]. 2022.
+Plotly Technologies Inc. Plotly: collaborative data science[EB/OL]. Montreal, QC, 2015. https://plotly.com.
+Dash Enterprise. Dash: a productive Python framework for building web analytic applications[EB/OL]. Plotly Technologies Inc., 2017. https://dash.plotly.com.
+DAWSON-HAGGERTY D, et al. Trimesh[EB/OL]. 2019. https://trimesh.org.
+ZHOU Q Y, PARK J, KOLTUN V. Open3D: a modern library for 3D data processing[J]. arXiv preprint arXiv:1801.09847, 2018.

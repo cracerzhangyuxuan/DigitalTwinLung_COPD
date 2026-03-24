@@ -41,7 +41,7 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     # ============================================================
 
     # UNet 模型推理
-    python run_phase3_pipeline.py --inference --model-type unet
+    python run_phase3_pipeline.py --inference --model-type unet --limit 3
 
     # Partial Conv 模型推理
     python run_phase3_pipeline.py --inference --model-type partial_conv
@@ -75,7 +75,7 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     python run_phase3_pipeline.py --visualize --model-type partial_conv
 
     # PatchGAN 结果可视化 #vertical——2行4列  horizontal——4行2列
-    python run_phase3_pipeline.py --visualize --model-type patchgan
+    python run_phase3_pipeline.py --visualize --model-type patchgan --limit 3
 
 
 
@@ -882,36 +882,59 @@ def _generate_patient_report(
     """
     from datetime import datetime
 
-    # 计算改进百分比
-    sharpness_improve = ((metrics['sharpness_ai'] - metrics['sharpness_warp']) /
-                         (metrics['sharpness_warp'] + 1e-10)) * 100
-    boundary_improve = ((metrics['boundary_grad_warp'] - metrics['boundary_grad_ai']) /
-                        (metrics['boundary_grad_warp'] + 1e-10)) * 100
+    # ====== 新逻辑：AI vs Real COPD + AI vs Embed 双轨对比 ======
+    # Warp (Direct Warp) 是≈类指标的参照基准 (Ref)
+    # Real COPD 替代原先 Warp 的位置，作为 AI 的主要对比对象
+    m = metrics  # 简写
 
-    # 判断胜负
-    sharpness_winner = '✓ AI wins' if metrics['sharpness_ai'] > metrics['sharpness_warp'] else '✗ Warp wins'
-    boundary_winner = '✓ AI wins' if metrics['boundary_grad_ai'] < metrics['boundary_grad_warp'] else '✗ Warp wins'
+    # ---------- 辅助函数：统一计算 winner 和 improvement ----------
+    def _calc_mono_up(ai_val, cmp_val, label):
+        """单调↑指标：越大越好"""
+        win = '✓ AI' if ai_val > cmp_val else f'✗ {label}'
+        imp = ((ai_val - cmp_val) / (cmp_val + 1e-10)) * 100
+        return win, imp
 
-    # GLCM 特征比较
-    contrast_dist_ai = abs(metrics['glcm_contrast_ai'] - metrics['glcm_contrast_real'])
-    contrast_dist_warp = abs(metrics['glcm_contrast_warp'] - metrics['glcm_contrast_real'])
-    contrast_winner = '✓ AI closer' if contrast_dist_ai < contrast_dist_warp else '✗ Warp closer'
+    def _calc_mono_down(ai_val, cmp_val, label):
+        """单调↓指标：越小越好"""
+        win = '✓ AI' if ai_val < cmp_val else f'✗ {label}'
+        imp = ((cmp_val - ai_val) / (cmp_val + 1e-10)) * 100
+        return win, imp
 
-    energy_dist_ai = abs(metrics['glcm_energy_ai'] - metrics['glcm_energy_real'])
-    energy_dist_warp = abs(metrics['glcm_energy_warp'] - metrics['glcm_energy_real'])
-    energy_winner = '✓ AI closer' if energy_dist_ai < energy_dist_warp else '✗ Warp closer'
+    def _calc_approx(ai_val, cmp_val, ref_val, label):
+        """≈类指标：越接近 Ref(Warp) 越好"""
+        dist_ai = abs(ai_val - ref_val)
+        dist_cmp = abs(cmp_val - ref_val)
+        win = '✓ AI' if dist_ai < dist_cmp else f'✗ {label}'
+        imp = ((dist_cmp - dist_ai) / (dist_cmp + 1e-10)) * 100
+        return win, imp
 
-    entropy_dist_ai = abs(metrics['glcm_entropy_ai'] - metrics['glcm_entropy_real'])
-    entropy_dist_warp = abs(metrics['glcm_entropy_warp'] - metrics['glcm_entropy_real'])
-    entropy_winner = '✓ AI closer' if entropy_dist_ai < entropy_dist_warp else '✗ Warp closer'
+    # --- 清晰度 (↑): AI vs Real COPD ---
+    sharp_r_win, sharp_r_imp = _calc_mono_up(m['sharpness_ai'], m['sharpness_real_copd'], 'Real')
+    sharp_e_win, sharp_e_imp = _calc_mono_up(m['sharpness_ai'], m['sharpness_real'], 'Embed')
 
-    correlation_dist_ai = abs(metrics['glcm_correlation_ai'] - metrics['glcm_correlation_real'])
-    correlation_dist_warp = abs(metrics['glcm_correlation_warp'] - metrics['glcm_correlation_real'])
-    correlation_winner = '✓ AI closer' if correlation_dist_ai < correlation_dist_warp else '✗ Warp closer'
+    # --- 边界梯度 (↓): AI vs Real COPD ---
+    bound_r_win, bound_r_imp = _calc_mono_down(m['boundary_grad_ai'], m['boundary_grad_real_copd'], 'Real')
+    bound_e_win, bound_e_imp = _calc_mono_down(m['boundary_grad_ai'], m['boundary_grad_real'], 'Embed')
 
-    homogeneity_dist_ai = abs(metrics['glcm_homogeneity_ai'] - metrics['glcm_homogeneity_real'])
-    homogeneity_dist_warp = abs(metrics['glcm_homogeneity_warp'] - metrics['glcm_homogeneity_real'])
-    homogeneity_winner = '✓ AI closer' if homogeneity_dist_ai < homogeneity_dist_warp else '✗ Warp closer'
+    # --- GLCM 对比度 (↑): AI vs Real COPD ---
+    g_con_r_win, g_con_r_imp = _calc_mono_up(m['glcm_contrast_ai'], m['glcm_contrast_real_copd'], 'Real')
+    g_con_e_win, g_con_e_imp = _calc_mono_up(m['glcm_contrast_ai'], m['glcm_contrast_real'], 'Embed')
+
+    # --- GLCM 熵 (↑): AI vs Real COPD ---
+    g_ent_r_win, g_ent_r_imp = _calc_mono_up(m['glcm_entropy_ai'], m['glcm_entropy_real_copd'], 'Real')
+    g_ent_e_win, g_ent_e_imp = _calc_mono_up(m['glcm_entropy_ai'], m['glcm_entropy_real'], 'Embed')
+
+    # --- GLCM 能量 (≈W): ref = Warp ---
+    g_ene_r_win, g_ene_r_imp = _calc_approx(m['glcm_energy_ai'], m['glcm_energy_real_copd'], m['glcm_energy_warp'], 'Real')
+    g_ene_e_win, g_ene_e_imp = _calc_approx(m['glcm_energy_ai'], m['glcm_energy_real'], m['glcm_energy_warp'], 'Embed')
+
+    # --- GLCM 相关性 (≈W): ref = Warp ---
+    g_cor_r_win, g_cor_r_imp = _calc_approx(m['glcm_correlation_ai'], m['glcm_correlation_real_copd'], m['glcm_correlation_warp'], 'Real')
+    g_cor_e_win, g_cor_e_imp = _calc_approx(m['glcm_correlation_ai'], m['glcm_correlation_real'], m['glcm_correlation_warp'], 'Embed')
+
+    # --- GLCM 同质性 (≈W): ref = Warp ---
+    g_hom_r_win, g_hom_r_imp = _calc_approx(m['glcm_homogeneity_ai'], m['glcm_homogeneity_real_copd'], m['glcm_homogeneity_warp'], 'Real')
+    g_hom_e_win, g_hom_e_imp = _calc_approx(m['glcm_homogeneity_ai'], m['glcm_homogeneity_real'], m['glcm_homogeneity_warp'], 'Embed')
 
     # 生成报告
     report_path = patient_output_dir / f"{patient_id}_evaluation_report.md"
@@ -922,27 +945,30 @@ def _generate_patient_report(
 
         f.write("## 基础指标\n\n")
         f.write("| 指标 | 值 |\n|------|----|\n")
-        f.write(f"| PSNR | {metrics['psnr']:.2f} dB |\n")
-        f.write(f"| SSIM | {metrics['ssim']:.4f} |\n")
-        f.write(f"| 真实肺气肿比例 | {metrics['real_emphysema_ratio']:.1%} |\n")
-        f.write(f"| AI肺气肿比例 | {metrics['fused_emphysema_ratio']:.1%} |\n")
-        f.write(f"| 病灶体素数 | {metrics['voxel_count']} |\n\n")
+        f.write(f"| PSNR | {m['psnr']:.2f} dB |\n")
+        f.write(f"| SSIM | {m['ssim']:.4f} |\n")
+        f.write(f"| 真实肺气肿比例 | {m['real_emphysema_ratio']:.1%} |\n")
+        f.write(f"| AI肺气肿比例 | {m['fused_emphysema_ratio']:.1%} |\n")
+        f.write(f"| 病灶体素数 | {m['voxel_count']} |\n\n")
 
         f.write(f"""## 纹理质量分析
 
-| 指标 | Real COPD | AI Fused | Direct Warp | AI vs Warp | 改进幅度 |
-|------|-----------|----------|-------------|------------|----------|
-| 清晰度 (↑ 越高越好) | {metrics['sharpness_real']:.2f} | {metrics['sharpness_ai']:.2f} | {metrics['sharpness_warp']:.2f} | {sharpness_winner} | {sharpness_improve:+.1f}% |
-| 边界梯度 (↓ 越低越好) | {metrics['boundary_grad_real']:.2f} | {metrics['boundary_grad_ai']:.2f} | {metrics['boundary_grad_warp']:.2f} | {boundary_winner} | {boundary_improve:+.1f}% |
-| GLCM 对比度 (↑ 越高越好) | {metrics['glcm_contrast_real']:.2f} | {metrics['glcm_contrast_ai']:.2f} | {metrics['glcm_contrast_warp']:.2f} | {contrast_winner} | Δ: AI={contrast_dist_ai:.2f}, Warp={contrast_dist_warp:.2f} |
-| GLCM 能量 (≈ Real 越近越好) | {metrics['glcm_energy_real']:.4f} | {metrics['glcm_energy_ai']:.4f} | {metrics['glcm_energy_warp']:.4f} | {energy_winner} | Δ: AI={energy_dist_ai:.4f}, Warp={energy_dist_warp:.4f} |
-| GLCM 熵 (↑ 越高越好) | {metrics['glcm_entropy_real']:.2f} | {metrics['glcm_entropy_ai']:.2f} | {metrics['glcm_entropy_warp']:.2f} | {entropy_winner} | Δ: AI={entropy_dist_ai:.2f}, Warp={entropy_dist_warp:.2f} |
-| GLCM 相关性 (≈ Real 越近越好) | {metrics['glcm_correlation_real']:.4f} | {metrics['glcm_correlation_ai']:.4f} | {metrics['glcm_correlation_warp']:.4f} | {correlation_winner} | Δ: AI={correlation_dist_ai:.4f}, Warp={correlation_dist_warp:.4f} |
-| GLCM 同质性 (≈ Real 越近越好) | {metrics['glcm_homogeneity_real']:.4f} | {metrics['glcm_homogeneity_ai']:.4f} | {metrics['glcm_homogeneity_warp']:.4f} | {homogeneity_winner} | Δ: AI={homogeneity_dist_ai:.4f}, Warp={homogeneity_dist_warp:.4f} |
+> **评估目标**：对比 AI 相较于 Embedded Template 的改进和优化。
+> ↑/↓ 指标按箭头方向直接比较数值；≈ 类指标以 Warp (Direct Warp) 为参照，越接近越好。
+
+| 指标 | Warp(Ref) | Embed | AI | Real COPD | AI vs Real COPD | AI vs Real COPD改进 | AI vs Embed | AI vs Embed改进 |
+|------|-----------|-------|------|-----------|-----------------|-------------------|-------------|----------------|
+| 清晰度 (↑) | {m['sharpness_warp']:.1f} | {m['sharpness_real']:.1f} | {m['sharpness_ai']:.1f} | {m['sharpness_real_copd']:.1f} | {sharp_r_win} | {sharp_r_imp:+.1f}% | {sharp_e_win} | {sharp_e_imp:+.1f}% |
+| 边界梯度 (↓) | {m['boundary_grad_warp']:.2f} | {m['boundary_grad_real']:.2f} | {m['boundary_grad_ai']:.2f} | {m['boundary_grad_real_copd']:.2f} | {bound_r_win} | {bound_r_imp:+.1f}% | {bound_e_win} | {bound_e_imp:+.1f}% |
+| GLCM 对比度 (↑) | {m['glcm_contrast_warp']:.4f} | {m['glcm_contrast_real']:.4f} | {m['glcm_contrast_ai']:.4f} | {m['glcm_contrast_real_copd']:.4f} | {g_con_r_win} | {g_con_r_imp:+.1f}% | {g_con_e_win} | {g_con_e_imp:+.1f}% |
+| GLCM 能量 (≈) | {m['glcm_energy_warp']:.4f} | {m['glcm_energy_real']:.4f} | {m['glcm_energy_ai']:.4f} | {m['glcm_energy_real_copd']:.4f} | {g_ene_r_win} | {g_ene_r_imp:+.1f}% | {g_ene_e_win} | {g_ene_e_imp:+.1f}% |
+| GLCM 熵 (↑) | {m['glcm_entropy_warp']:.4f} | {m['glcm_entropy_real']:.4f} | {m['glcm_entropy_ai']:.4f} | {m['glcm_entropy_real_copd']:.4f} | {g_ent_r_win} | {g_ent_r_imp:+.1f}% | {g_ent_e_win} | {g_ent_e_imp:+.1f}% |
+| GLCM 相关性 (≈) | {m['glcm_correlation_warp']:.4f} | {m['glcm_correlation_real']:.4f} | {m['glcm_correlation_ai']:.4f} | {m['glcm_correlation_real_copd']:.4f} | {g_cor_r_win} | {g_cor_r_imp:+.1f}% | {g_cor_e_win} | {g_cor_e_imp:+.1f}% |
+| GLCM 同质性 (≈) | {m['glcm_homogeneity_warp']:.4f} | {m['glcm_homogeneity_real']:.4f} | {m['glcm_homogeneity_ai']:.4f} | {m['glcm_homogeneity_real_copd']:.4f} | {g_hom_r_win} | {g_hom_r_imp:+.1f}% | {g_hom_e_win} | {g_hom_e_imp:+.1f}% |
 
 ![纹理质量雷达图]({patient_id}_texture_radar.png)
 """)
-
+ 
 
 def _generate_texture_radar_chart(
     output_dir: Path,
@@ -959,139 +985,172 @@ def _generate_texture_radar_chart(
     """
     生成综合质量雷达图（蜘蛛图）
 
-    使用混合评价维度：
-    - Sharpness & Boundary: 归一化后的绝对值（展示 AI 的优势）
-    - GLCM 特征: 与 Real COPD 的相似度（展示纹理保真度）
+    展示三条曲线：Real COPD、AI Fused、Direct Warp。
+    每个维度的节点位置直接对齐 Markdown 表格中的真实数值（通过 min-max
+    归一化映射到 [0.1, 1.0] 区间），并在顶点处标注原始数值。
 
     Args:
         output_dir: 输出目录
-        contrast_*, energy_*, entropy_*, correlation_*, homogeneity_*: 各方法的 GLCM 特征值
+        contrast_*, energy_*, entropy_*, correlation_*, homogeneity_*:
+            各方法的 GLCM 特征值（*_real = Real COPD）
         logger: 日志记录器
-        filename: 输出文件名（默认: 'texture_quality_radar.png'）
+        filename: 输出文件名
         sharpness_*, boundary_*: 清晰度和边界梯度值（可选）
     """
     import matplotlib.pyplot as plt
     import numpy as np
 
-    # 判断是否包含 Sharpness 和 Boundary 数据
+    # ---------- 辅助：中值锚定 + 范围扩展 归一化 ----------
+    # 核心思路：当三个值非常接近时，纯 min-max 会把微小差异拉伸到全范围，
+    # 视觉上严重夸大。采用"中值锚定"策略：
+    #   1) 以三个值的中位数(median)为中心；
+    #   2) 向外扩展 max(实际半径 * expand_ratio, median * min_pct) 作为归一化范围；
+    #   3) 这样值差微小时，三个点聚拢在中心附近，不会极端分散。
+    center_target = 0.68  # 归一化后的中心锚定位置（上移至0.68，使曲线更靠近外圈）
+    spread_half   = 0.38  # 可用的半幅度（上下各0.38 → 映射到[0.30, 1.06]，充分利用外圈）
+    expand_ratio  = 1.8   # 扩展系数：实际数据范围 × 1.8 作为归一化范围
+    min_pct       = 0.10  # 最小范围保底：中位数 × 10%（防止三值几乎相等时退化）
+
+    def _norm_centered(val, median, half_range):
+        """将 val 映射到以 center_target 为中心的归一化坐标"""
+        if half_range < 1e-12:
+            return center_target
+        return center_target + spread_half * (val - median) / half_range
+
+    def _norm_centered_inv(val, median, half_range):
+        """越低越好的指标：取反映射"""
+        if half_range < 1e-12:
+            return center_target
+        return center_target - spread_half * (val - median) / half_range
+
+    # ---------- 构建维度 ----------
     include_sharpness_boundary = (sharpness_real is not None and boundary_real is not None)
 
     if include_sharpness_boundary:
-        # 完整版雷达图：包含 Sharpness, Boundary 和 GLCM 特征
-        categories = ['Sharpness\n(↑)', 'Boundary\n(↓)', 'GLCM\nContrast', 'GLCM\nEnergy',
-                      'GLCM\nEntropy', 'GLCM\nCorrelation', 'GLCM\nHomogeneity']
-        N = len(categories)
-
-        # === 1. Sharpness: 归一化到 0-1（越高越好）===
-        # 使用带 padding 的归一化：防止当只有 2 个不同值时退化为 0/1 极端
-        all_sharpness = [sharpness_real, sharpness_ai, sharpness_warp]
-        min_sharp, max_sharp = min(all_sharpness), max(all_sharpness)
-        sharp_range = max_sharp - min_sharp if max_sharp > min_sharp else 1.0
-        # 添加 10% padding，使最小值归一化为 0.1 而非 0.0
-        padding = 0.1
-
-        sharp_real_norm = padding + (1 - 2 * padding) * (sharpness_real - min_sharp) / sharp_range
-        sharp_ai_norm = padding + (1 - 2 * padding) * (sharpness_ai - min_sharp) / sharp_range
-        sharp_warp_norm = padding + (1 - 2 * padding) * (sharpness_warp - min_sharp) / sharp_range
-
-        # === 2. Boundary: 归一化到 0-1 并取反（越低越好 → 雷达图上越高越好）===
-        all_boundary = [boundary_real, boundary_ai, boundary_warp]
-        min_bound, max_bound = min(all_boundary), max(all_boundary)
-        bound_range = max_bound - min_bound if max_bound > min_bound else 1.0
-
-        # 取反 + padding：低 boundary 值映射到高分
-        bound_real_norm = padding + (1 - 2 * padding) * (1.0 - (boundary_real - min_bound) / bound_range)
-        bound_ai_norm = padding + (1 - 2 * padding) * (1.0 - (boundary_ai - min_bound) / bound_range)
-        bound_warp_norm = padding + (1 - 2 * padding) * (1.0 - (boundary_warp - min_bound) / bound_range)
-
-        # === 3. GLCM 特征: 使用相似度（越接近 Real 越好）===
-        glcm_real_values = [contrast_real, energy_real, entropy_real, correlation_real, homogeneity_real]
-        glcm_ai_values = [contrast_ai, energy_ai, entropy_ai, correlation_ai, homogeneity_ai]
-        glcm_warp_values = [contrast_warp, energy_warp, entropy_warp, correlation_warp, homogeneity_warp]
-
-        # 计算距离
-        glcm_ai_distances = [abs(ai - real) for ai, real in zip(glcm_ai_values, glcm_real_values)]
-        glcm_warp_distances = [abs(warp - real) for warp, real in zip(glcm_warp_values, glcm_real_values)]
-
-        # 归一化距离
-        all_glcm_distances = glcm_ai_distances + glcm_warp_distances
-        max_glcm_dist = max(all_glcm_distances) if max(all_glcm_distances) > 0 else 1.0
-
-        # 转换为相似度
-        glcm_ai_similarity = [1.0 - (d / max_glcm_dist) for d in glcm_ai_distances]
-        glcm_warp_similarity = [1.0 - (d / max_glcm_dist) for d in glcm_warp_distances]
-        glcm_real_similarity = [1.0] * 5  # Real 与自己相似度为 1
-
-        # 组合所有维度
-        real_scores = [sharp_real_norm, bound_real_norm] + glcm_real_similarity
-        ai_scores = [sharp_ai_norm, bound_ai_norm] + glcm_ai_similarity
-        warp_scores = [sharp_warp_norm, bound_warp_norm] + glcm_warp_similarity
-
+        categories = ['Sharpness\n(↑)', 'Boundary\n(↓)',
+                      'GLCM\nContrast(↑)', 'GLCM\nEnergy(≈)',
+                      'GLCM\nEntropy(↑)', 'GLCM\nCorrelation(≈)',
+                      'GLCM\nHomogeneity(≈)']
+        # 三组原始值：(real, ai, warp) × 7 维度
+        raw_real = [sharpness_real, boundary_real,
+                    contrast_real, energy_real, entropy_real,
+                    correlation_real, homogeneity_real]
+        raw_ai   = [sharpness_ai, boundary_ai,
+                    contrast_ai, energy_ai, entropy_ai,
+                    correlation_ai, homogeneity_ai]
+        raw_warp = [sharpness_warp, boundary_warp,
+                    contrast_warp, energy_warp, entropy_warp,
+                    correlation_warp, homogeneity_warp]
+        # 每个维度的归一化方向：True = 越大越好(正序), False = 越小越好(反序)
+        ascending = [True, False, True, True, True, True, True]
     else:
-        # 简化版雷达图：只包含 GLCM 特征
         categories = ['Contrast', 'Energy', 'Entropy', 'Correlation', 'Homogeneity']
-        N = len(categories)
+        raw_real = [contrast_real, energy_real, entropy_real, correlation_real, homogeneity_real]
+        raw_ai   = [contrast_ai, energy_ai, entropy_ai, correlation_ai, homogeneity_ai]
+        raw_warp = [contrast_warp, energy_warp, entropy_warp, correlation_warp, homogeneity_warp]
+        ascending = [True, True, True, True, True]
 
-        real_values = [contrast_real, energy_real, entropy_real, correlation_real, homogeneity_real]
-        ai_values = [contrast_ai, energy_ai, entropy_ai, correlation_ai, homogeneity_ai]
-        warp_values = [contrast_warp, energy_warp, entropy_warp, correlation_warp, homogeneity_warp]
+    N = len(categories)
 
-        ai_distances = [abs(ai - real) for ai, real in zip(ai_values, real_values)]
-        warp_distances = [abs(warp - real) for warp, real in zip(warp_values, real_values)]
+    # ---------- 逐维度：中值锚定归一化 ----------
+    real_scores, ai_scores, warp_scores = [], [], []
+    for i in range(N):
+        vals = [raw_real[i], raw_ai[i], raw_warp[i]]
+        median = sorted(vals)[1]  # 三个值的中位数
+        actual_half = (max(vals) - min(vals)) / 2.0
+        # 归一化半径：取 (实际半径 × expand_ratio) 和 (median × min_pct) 中的较大者
+        half_range = max(actual_half * expand_ratio,
+                         abs(median) * min_pct,
+                         1e-6)  # 绝对保底
 
-        all_distances = ai_distances + warp_distances
-        max_dist = max(all_distances) if max(all_distances) > 0 else 1.0
+        if ascending[i]:
+            real_scores.append(_norm_centered(raw_real[i], median, half_range))
+            ai_scores.append(_norm_centered(raw_ai[i], median, half_range))
+            warp_scores.append(_norm_centered(raw_warp[i], median, half_range))
+        else:
+            real_scores.append(_norm_centered_inv(raw_real[i], median, half_range))
+            ai_scores.append(_norm_centered_inv(raw_ai[i], median, half_range))
+            warp_scores.append(_norm_centered_inv(raw_warp[i], median, half_range))
 
-        real_scores = [1.0] * N
-        ai_scores = [1.0 - (d / max_dist) for d in ai_distances]
-        warp_scores = [1.0 - (d / max_dist) for d in warp_distances]
+    # 安全裁剪到 [0.10, 1.10]，防止极端值溢出绘图范围
+    real_scores = [max(0.10, min(1.10, s)) for s in real_scores]
+    ai_scores   = [max(0.10, min(1.10, s)) for s in ai_scores]
+    warp_scores = [max(0.10, min(1.10, s)) for s in warp_scores]
 
-    # 计算角度
+    # ---------- 原始值的显示格式 ----------
+    def _fmt(v, idx):
+        """根据维度选择合适的显示格式"""
+        if include_sharpness_boundary:
+            if idx == 0:   return f'{v:.1f}'    # Sharpness
+            if idx == 1:   return f'{v:.2f}'    # Boundary
+            return f'{v:.4f}'                   # GLCM
+        return f'{v:.4f}'
+
+    # ---------- 闭合多边形 ----------
     angles = [n / float(N) * 2 * np.pi for n in range(N)]
-    angles += angles[:1]  # 闭合多边形
-
-    # 闭合数据
+    angles += angles[:1]
     real_scores += real_scores[:1]
-    ai_scores += ai_scores[:1]
+    ai_scores   += ai_scores[:1]
     warp_scores += warp_scores[:1]
 
-    # 创建图形
-    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
+    # ---------- 绘图 ----------
+    fig, ax = plt.subplots(figsize=(15, 15), subplot_kw=dict(polar=True))
 
-    # 绘制三个多边形
-    ax.plot(angles, real_scores, 'o-', linewidth=2.5, label='Real COPD (Reference)', color='#2ecc71', markersize=8)
-    ax.fill(angles, real_scores, alpha=0.15, color='#2ecc71')
+    # 三条曲线（颜色与图例保持不变）
+    ax.plot(angles, real_scores, 'o-', linewidth=2.5, label='Real COPD',
+            color='#2ecc71', markersize=8)
+    ax.fill(angles, real_scores, alpha=0.10, color='#2ecc71')
 
-    ax.plot(angles, ai_scores, 's-', linewidth=2.5, label='AI Fused', color='#3498db', markersize=8)
-    ax.fill(angles, ai_scores, alpha=0.25, color='#3498db')
+    ax.plot(angles, ai_scores, 's-', linewidth=2.5, label='AI Fused',
+            color='#3498db', markersize=8)
+    ax.fill(angles, ai_scores, alpha=0.20, color='#3498db')
 
-    ax.plot(angles, warp_scores, '^-', linewidth=2.5, label='Direct Warp', color='#e74c3c', markersize=8)
-    ax.fill(angles, warp_scores, alpha=0.25, color='#e74c3c')
+    ax.plot(angles, warp_scores, '^-', linewidth=2.5, label='Direct Warp',
+            color='#e74c3c', markersize=8)
+    ax.fill(angles, warp_scores, alpha=0.20, color='#e74c3c')
 
-    # 设置标签
+    # ---------- 数值标签 ----------
+    label_offset = 0.09   # 径向偏移量（略减以确保标签不超出 ylim=1.20）
+    for i in range(N):
+        angle = angles[i]
+        # 三条曲线各自标注，添加角度偏移避免重叠
+        items = [
+            (real_scores[i], raw_real[i], '#2ecc71', -0.08),
+            (ai_scores[i],   raw_ai[i],   '#3498db',  0.00),
+            (warp_scores[i], raw_warp[i],  '#e74c3c',  0.08),
+        ]
+        for score, raw_val, color, angle_shift in items:
+            ax.text(angle + angle_shift, score + label_offset,
+                    _fmt(raw_val, i),
+                    ha='center', va='bottom', fontsize=11, fontweight='bold',
+                    color=color, alpha=0.95,
+                    bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                              edgecolor='none', alpha=0.6))
+
+    # 轴标签和网格
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(categories, size=11, weight='bold')
-
-    # 设置 y 轴范围和网格
-    ax.set_ylim(0, 1.1)
+    ax.set_xticklabels(categories, size=13, weight='bold')
+    ax.set_ylim(0, 1.20)  # 缩小上限：曲线最高达~1.10，ylim=1.20 留一点边距即可
     ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
-    ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], size=9)
+    ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], size=11)
     ax.grid(True, linestyle='--', alpha=0.7)
 
-    # 设置标题和图例
+    # 标题和图例
     if include_sharpness_boundary:
-        title = 'Comprehensive Quality Radar Chart\n(Larger area = Better overall quality)'
+        title = ('Comprehensive Quality Radar Chart\n'
+                 '(Median-anchored normalization; labels = raw values)')
     else:
-        title = 'GLCM Texture Similarity to Real COPD\n(Larger area = More similar to Real COPD)'
+        title = ('GLCM Texture Quality Radar Chart\n'
+                 '(Median-anchored normalization; labels = raw values)')
+    ax.set_title(title, size=17, weight='bold', y=1.08)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.35, 1.1), fontsize=14,
+              framealpha=0.9)
 
-    ax.set_title(title, size=14, weight='bold', y=1.08)
-    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize=11, framealpha=0.9)
-
-    # 保存图形
+    # 保存
     radar_path = output_dir / filename
     plt.tight_layout()
-    plt.savefig(radar_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    plt.savefig(radar_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
 
     logger.info(f"  ✓ 雷达图已保存: {radar_path}")
 
@@ -1217,28 +1276,44 @@ def run_model_evaluation(
             else:
                 warp_data = real_data  # 回退：模板不可用时用 real_data
 
-            # 找到病灶面积最大的切片用于 2D 指标计算
-            slice_areas = [np.sum(mask_data[:, :, z] > 0) for z in range(mask_data.shape[2])]
+            # 找到病灶面积最大的切片用于 2D 指标计算（向量化操作，无 Python 循环）
+            slice_areas = np.sum(mask_data > 0, axis=(0, 1))
             best_slice_idx = int(np.argmax(slice_areas))
 
             # 提取 2D 切片
-            real_slice = real_data[:, :, best_slice_idx]
             fused_slice = fused_data[:, :, best_slice_idx]
             warp_slice = warp_data[:, :, best_slice_idx]
             mask_slice = mask_data[:, :, best_slice_idx]
 
+            # ====== 构建 Embedded Lesion 评估基准（仅 2D 切片级别操作）======
+            # 将 real_data 中的病灶区域嵌入到 template (warp_data) 的最佳切片中
+            # 以此作为清晰度和边界梯度的计算基准 (Embedded Template)
+            # 注意：仅拷贝单个 2D 切片，避免拷贝整个 3D 体积（~500MB+）
+            embedded_slice = warp_slice.copy()
+            mask_2d = mask_slice > 0
+            real_slice_2d = real_data[:, :, best_slice_idx]
+            embedded_slice[mask_2d] = real_slice_2d[mask_2d]
+
             # 计算清晰度 (值越高越好)
-            sharpness_real = compute_sharpness(real_slice, mask_slice)
+            sharpness_real = compute_sharpness(embedded_slice, mask_slice)      # Embedded Template
+            sharpness_real_copd = compute_sharpness(real_slice_2d, mask_slice)  # Real COPD
             sharpness_ai = compute_sharpness(fused_slice, mask_slice)
             sharpness_warp = compute_sharpness(warp_slice, mask_slice)
 
             # 计算边界连续性 (值越低融合越平滑)
-            boundary_real = compute_boundary_continuity(real_slice, mask_slice)
+            boundary_real = compute_boundary_continuity(embedded_slice, mask_slice)      # Embedded Template
+            boundary_real_copd = compute_boundary_continuity(real_slice_2d, mask_slice)  # Real COPD
             boundary_ai = compute_boundary_continuity(fused_slice, mask_slice)
             boundary_warp = compute_boundary_continuity(warp_slice, mask_slice)
 
             # 计算 GLCM 纹理特征
-            glcm_real = compute_glcm_features(real_slice, mask_slice)
+            # glcm_real: 基准为 Embedded Template（用于对比度/熵等单调指标的参照）
+            # glcm_real_copd: 基准为真实 COPD warped 切片（用于能量/相关性/同质性等
+            #   "≈越近越好"指标的参照，因 GLCM 使用 bounding-box 裁切，包含 mask 外
+            #   背景像素；Embedded 的背景为健康模板（HU ≈ -836），Real 为真实 COPD
+            #   组织（HU ≈ -977），使用 Real 作为参照更能反映真实纹理分布）
+            glcm_real = compute_glcm_features(embedded_slice, mask_slice)
+            glcm_real_copd = compute_glcm_features(real_slice_2d, mask_slice)
             glcm_ai = compute_glcm_features(fused_slice, mask_slice)
             glcm_warp = compute_glcm_features(warp_slice, mask_slice)
 
@@ -1250,27 +1325,35 @@ def run_model_evaluation(
                 'real_emphysema_ratio': float(real_emph),
                 'fused_emphysema_ratio': float(fused_emph),
                 'voxel_count': int(mask_bool.sum()),
-                # 新增纹理质量指标
+                # 纹理质量指标
+                # *_real = Embedded Template, *_real_copd = Real COPD（配准后真实数据）
                 'sharpness_real': sharpness_real,
+                'sharpness_real_copd': sharpness_real_copd,
                 'sharpness_ai': sharpness_ai,
                 'sharpness_warp': sharpness_warp,
                 'boundary_grad_real': boundary_real,
+                'boundary_grad_real_copd': boundary_real_copd,
                 'boundary_grad_ai': boundary_ai,
                 'boundary_grad_warp': boundary_warp,
-                # 扩展 GLCM 特征
+                # GLCM: *_real = Embedded Template, *_real_copd = 真实 COPD
                 'glcm_contrast_real': glcm_real['glcm_contrast'],
+                'glcm_contrast_real_copd': glcm_real_copd['glcm_contrast'],
                 'glcm_contrast_ai': glcm_ai['glcm_contrast'],
                 'glcm_contrast_warp': glcm_warp['glcm_contrast'],
                 'glcm_energy_real': glcm_real['glcm_energy'],
+                'glcm_energy_real_copd': glcm_real_copd['glcm_energy'],
                 'glcm_energy_ai': glcm_ai['glcm_energy'],
                 'glcm_energy_warp': glcm_warp['glcm_energy'],
                 'glcm_entropy_real': glcm_real['glcm_entropy'],
+                'glcm_entropy_real_copd': glcm_real_copd['glcm_entropy'],
                 'glcm_entropy_ai': glcm_ai['glcm_entropy'],
                 'glcm_entropy_warp': glcm_warp['glcm_entropy'],
                 'glcm_correlation_real': glcm_real['glcm_correlation'],
+                'glcm_correlation_real_copd': glcm_real_copd['glcm_correlation'],
                 'glcm_correlation_ai': glcm_ai['glcm_correlation'],
                 'glcm_correlation_warp': glcm_warp['glcm_correlation'],
                 'glcm_homogeneity_real': glcm_real['glcm_homogeneity'],
+                'glcm_homogeneity_real_copd': glcm_real_copd['glcm_homogeneity'],
                 'glcm_homogeneity_ai': glcm_ai['glcm_homogeneity'],
                 'glcm_homogeneity_warp': glcm_warp['glcm_homogeneity'],
             }
@@ -1288,20 +1371,21 @@ def run_model_evaluation(
                 logger.warning(f"  ⚠ {patient_id} Markdown 报告生成失败: {e}")
 
             # 生成患者单独的雷达图（包含 Sharpness 和 Boundary）
+            # 传入 Real COPD 数据（glcm_real_copd）替代 Embedded Template（glcm_real）
             try:
                 _generate_texture_radar_chart(
                     patient_output_dir,
-                    glcm_real['glcm_contrast'], glcm_ai['glcm_contrast'], glcm_warp['glcm_contrast'],
-                    glcm_real['glcm_energy'], glcm_ai['glcm_energy'], glcm_warp['glcm_energy'],
-                    glcm_real['glcm_entropy'], glcm_ai['glcm_entropy'], glcm_warp['glcm_entropy'],
-                    glcm_real['glcm_correlation'], glcm_ai['glcm_correlation'], glcm_warp['glcm_correlation'],
-                    glcm_real['glcm_homogeneity'], glcm_ai['glcm_homogeneity'], glcm_warp['glcm_homogeneity'],
+                    glcm_real_copd['glcm_contrast'], glcm_ai['glcm_contrast'], glcm_warp['glcm_contrast'],
+                    glcm_real_copd['glcm_energy'], glcm_ai['glcm_energy'], glcm_warp['glcm_energy'],
+                    glcm_real_copd['glcm_entropy'], glcm_ai['glcm_entropy'], glcm_warp['glcm_entropy'],
+                    glcm_real_copd['glcm_correlation'], glcm_ai['glcm_correlation'], glcm_warp['glcm_correlation'],
+                    glcm_real_copd['glcm_homogeneity'], glcm_ai['glcm_homogeneity'], glcm_warp['glcm_homogeneity'],
                     logger,
                     filename=f"{patient_id}_texture_radar.png",
-                    sharpness_real=sharpness_real,
+                    sharpness_real=sharpness_real_copd,
                     sharpness_ai=sharpness_ai,
                     sharpness_warp=sharpness_warp,
-                    boundary_real=boundary_real,
+                    boundary_real=boundary_real_copd,
                     boundary_ai=boundary_ai,
                     boundary_warp=boundary_warp
                 )
@@ -1328,39 +1412,81 @@ def run_model_evaluation(
 
     # 计算平均纹理质量指标
     avg_sharpness_real = np.mean([m['sharpness_real'] for m in all_metrics])
+    avg_sharpness_real_copd = np.mean([m['sharpness_real_copd'] for m in all_metrics])
     avg_sharpness_ai = np.mean([m['sharpness_ai'] for m in all_metrics])
     avg_sharpness_warp = np.mean([m['sharpness_warp'] for m in all_metrics])
 
     avg_boundary_real = np.mean([m['boundary_grad_real'] for m in all_metrics])
+    avg_boundary_real_copd = np.mean([m['boundary_grad_real_copd'] for m in all_metrics])
     avg_boundary_ai = np.mean([m['boundary_grad_ai'] for m in all_metrics])
     avg_boundary_warp = np.mean([m['boundary_grad_warp'] for m in all_metrics])
 
     # 扩展 GLCM 特征平均值
     avg_glcm_contrast_real = np.mean([m['glcm_contrast_real'] for m in all_metrics])
+    avg_glcm_contrast_real_copd = np.mean([m['glcm_contrast_real_copd'] for m in all_metrics])
     avg_glcm_contrast_ai = np.mean([m['glcm_contrast_ai'] for m in all_metrics])
     avg_glcm_contrast_warp = np.mean([m['glcm_contrast_warp'] for m in all_metrics])
 
     avg_glcm_energy_real = np.mean([m['glcm_energy_real'] for m in all_metrics])
+    avg_glcm_energy_real_copd = np.mean([m['glcm_energy_real_copd'] for m in all_metrics])
     avg_glcm_energy_ai = np.mean([m['glcm_energy_ai'] for m in all_metrics])
     avg_glcm_energy_warp = np.mean([m['glcm_energy_warp'] for m in all_metrics])
 
     avg_glcm_entropy_real = np.mean([m['glcm_entropy_real'] for m in all_metrics])
+    avg_glcm_entropy_real_copd = np.mean([m['glcm_entropy_real_copd'] for m in all_metrics])
     avg_glcm_entropy_ai = np.mean([m['glcm_entropy_ai'] for m in all_metrics])
     avg_glcm_entropy_warp = np.mean([m['glcm_entropy_warp'] for m in all_metrics])
 
     avg_glcm_correlation_real = np.mean([m['glcm_correlation_real'] for m in all_metrics])
+    avg_glcm_correlation_real_copd = np.mean([m['glcm_correlation_real_copd'] for m in all_metrics])
     avg_glcm_correlation_ai = np.mean([m['glcm_correlation_ai'] for m in all_metrics])
     avg_glcm_correlation_warp = np.mean([m['glcm_correlation_warp'] for m in all_metrics])
 
     avg_glcm_homogeneity_real = np.mean([m['glcm_homogeneity_real'] for m in all_metrics])
+    avg_glcm_homogeneity_real_copd = np.mean([m['glcm_homogeneity_real_copd'] for m in all_metrics])
     avg_glcm_homogeneity_ai = np.mean([m['glcm_homogeneity_ai'] for m in all_metrics])
     avg_glcm_homogeneity_warp = np.mean([m['glcm_homogeneity_warp'] for m in all_metrics])
 
-    # 计算改进百分比
-    # Sharpness: 越高越好，improvement = (AI - Warp) / Warp * 100%
-    sharpness_improve = ((avg_sharpness_ai - avg_sharpness_warp) / (avg_sharpness_warp + 1e-10)) * 100
-    # Boundary: 越低越好，improvement = (Warp - AI) / Warp * 100%
-    boundary_improve = ((avg_boundary_warp - avg_boundary_ai) / (avg_boundary_warp + 1e-10)) * 100
+    # ====== 辅助函数：统一计算 winner 和 improvement ======
+    def _calc_mono_up(ai_v, cmp_v, label):
+        win = '✓ AI' if ai_v > cmp_v else f'✗ {label}'
+        imp = ((ai_v - cmp_v) / (cmp_v + 1e-10)) * 100
+        return win, imp
+
+    def _calc_mono_down(ai_v, cmp_v, label):
+        win = '✓ AI' if ai_v < cmp_v else f'✗ {label}'
+        imp = ((cmp_v - ai_v) / (cmp_v + 1e-10)) * 100
+        return win, imp
+
+    def _calc_approx(ai_v, cmp_v, ref_v, label):
+        """≈类指标：越接近 Ref(Warp) 越好"""
+        dist_ai = abs(ai_v - ref_v)
+        dist_cmp = abs(cmp_v - ref_v)
+        win = '✓ AI' if dist_ai < dist_cmp else f'✗ {label}'
+        imp = ((dist_cmp - dist_ai) / (dist_cmp + 1e-10)) * 100
+        return win, imp
+
+    # --- 清晰度 (↑): AI vs Real COPD ---
+    s_r_win, s_r_imp = _calc_mono_up(avg_sharpness_ai, avg_sharpness_real_copd, 'Real')
+    s_e_win, s_e_imp = _calc_mono_up(avg_sharpness_ai, avg_sharpness_real, 'Embed')
+    # --- 边界梯度 (↓): AI vs Real COPD ---
+    b_r_win, b_r_imp = _calc_mono_down(avg_boundary_ai, avg_boundary_real_copd, 'Real')
+    b_e_win, b_e_imp = _calc_mono_down(avg_boundary_ai, avg_boundary_real, 'Embed')
+    # --- GLCM 对比度 (↑): AI vs Real COPD ---
+    gc_r_win, gc_r_imp = _calc_mono_up(avg_glcm_contrast_ai, avg_glcm_contrast_real_copd, 'Real')
+    gc_e_win, gc_e_imp = _calc_mono_up(avg_glcm_contrast_ai, avg_glcm_contrast_real, 'Embed')
+    # --- GLCM 熵 (↑): AI vs Real COPD ---
+    gn_r_win, gn_r_imp = _calc_mono_up(avg_glcm_entropy_ai, avg_glcm_entropy_real_copd, 'Real')
+    gn_e_win, gn_e_imp = _calc_mono_up(avg_glcm_entropy_ai, avg_glcm_entropy_real, 'Embed')
+    # --- GLCM 能量 (≈W): ref = Warp ---
+    ge_r_win, ge_r_imp = _calc_approx(avg_glcm_energy_ai, avg_glcm_energy_real_copd, avg_glcm_energy_warp, 'Real')
+    ge_e_win, ge_e_imp = _calc_approx(avg_glcm_energy_ai, avg_glcm_energy_real, avg_glcm_energy_warp, 'Embed')
+    # --- GLCM 相关性 (≈W): ref = Warp ---
+    gr_r_win, gr_r_imp = _calc_approx(avg_glcm_correlation_ai, avg_glcm_correlation_real_copd, avg_glcm_correlation_warp, 'Real')
+    gr_e_win, gr_e_imp = _calc_approx(avg_glcm_correlation_ai, avg_glcm_correlation_real, avg_glcm_correlation_warp, 'Embed')
+    # --- GLCM 同质性 (≈W): ref = Warp ---
+    gh_r_win, gh_r_imp = _calc_approx(avg_glcm_homogeneity_ai, avg_glcm_homogeneity_real_copd, avg_glcm_homogeneity_warp, 'Real')
+    gh_e_win, gh_e_imp = _calc_approx(avg_glcm_homogeneity_ai, avg_glcm_homogeneity_real, avg_glcm_homogeneity_warp, 'Embed')
 
     logger.info("")
     logger.info("  === 评估汇总 ===")
@@ -1370,26 +1496,27 @@ def run_model_evaluation(
     logger.info(f"  AI 融合 平均肺气肿比例: {avg_fused_emph:.1%}")
     logger.info("")
     logger.info("  === 纹理质量分析 ===")
-    logger.info(f"  清晰度 (↑更好): Real={avg_sharpness_real:.2f}, AI={avg_sharpness_ai:.2f}, Warp={avg_sharpness_warp:.2f} | AI改进: {sharpness_improve:+.1f}%")
-    logger.info(f"  边界梯度 (↓更好): Real={avg_boundary_real:.2f}, AI={avg_boundary_ai:.2f}, Warp={avg_boundary_warp:.2f} | AI改进: {boundary_improve:+.1f}%")
-    logger.info(f"  GLCM对比度: Real={avg_glcm_contrast_real:.2f}, AI={avg_glcm_contrast_ai:.2f}, Warp={avg_glcm_contrast_warp:.2f}")
-    logger.info(f"  GLCM熵: Real={avg_glcm_entropy_real:.2f}, AI={avg_glcm_entropy_ai:.2f}, Warp={avg_glcm_entropy_warp:.2f}")
+    logger.info(f"  清晰度 (↑): Warp={avg_sharpness_warp:.2f}, Embed={avg_sharpness_real:.2f}, AI={avg_sharpness_ai:.2f}, RealCOPD={avg_sharpness_real_copd:.2f} | vs Real: {s_r_imp:+.1f}% | vs Embed: {s_e_imp:+.1f}%")
+    logger.info(f"  边界梯度 (↓): Warp={avg_boundary_warp:.2f}, Embed={avg_boundary_real:.2f}, AI={avg_boundary_ai:.2f}, RealCOPD={avg_boundary_real_copd:.2f} | vs Real: {b_r_imp:+.1f}% | vs Embed: {b_e_imp:+.1f}%")
+    logger.info(f"  GLCM对比度 (↑): Warp={avg_glcm_contrast_warp:.2f}, Embed={avg_glcm_contrast_real:.2f}, AI={avg_glcm_contrast_ai:.2f}, RealCOPD={avg_glcm_contrast_real_copd:.2f}")
+    logger.info(f"  GLCM熵 (↑): Warp={avg_glcm_entropy_warp:.2f}, Embed={avg_glcm_entropy_real:.2f}, AI={avg_glcm_entropy_ai:.2f}, RealCOPD={avg_glcm_entropy_real_copd:.2f}")
 
     # 生成雷达图（包含 Sharpness 和 Boundary）
+    # 传入 Real COPD 数据（avg_*_real_copd）替代 Embedded Template（avg_*_real）
     try:
         _generate_texture_radar_chart(
             output_dir,
-            avg_glcm_contrast_real, avg_glcm_contrast_ai, avg_glcm_contrast_warp,
-            avg_glcm_energy_real, avg_glcm_energy_ai, avg_glcm_energy_warp,
-            avg_glcm_entropy_real, avg_glcm_entropy_ai, avg_glcm_entropy_warp,
-            avg_glcm_correlation_real, avg_glcm_correlation_ai, avg_glcm_correlation_warp,
-            avg_glcm_homogeneity_real, avg_glcm_homogeneity_ai, avg_glcm_homogeneity_warp,
+            avg_glcm_contrast_real_copd, avg_glcm_contrast_ai, avg_glcm_contrast_warp,
+            avg_glcm_energy_real_copd, avg_glcm_energy_ai, avg_glcm_energy_warp,
+            avg_glcm_entropy_real_copd, avg_glcm_entropy_ai, avg_glcm_entropy_warp,
+            avg_glcm_correlation_real_copd, avg_glcm_correlation_ai, avg_glcm_correlation_warp,
+            avg_glcm_homogeneity_real_copd, avg_glcm_homogeneity_ai, avg_glcm_homogeneity_warp,
             logger,
             filename='texture_quality_radar.png',
-            sharpness_real=avg_sharpness_real,
+            sharpness_real=avg_sharpness_real_copd,
             sharpness_ai=avg_sharpness_ai,
             sharpness_warp=avg_sharpness_warp,
-            boundary_real=avg_boundary_real,
+            boundary_real=avg_boundary_real_copd,
             boundary_ai=avg_boundary_ai,
             boundary_warp=avg_boundary_warp
         )
@@ -1398,29 +1525,10 @@ def run_model_evaluation(
 
     # 保存报告
     report_path = output_dir / 'evaluation_report.md'
-    sharpness_winner = '✓ AI wins' if avg_sharpness_ai > avg_sharpness_warp else '✗ Warp wins'
-    boundary_winner = '✓ AI wins' if avg_boundary_ai < avg_boundary_warp else '✗ Warp wins'
 
-    # GLCM 特征比较：计算与 Real COPD 的距离，距离越小越好
-    contrast_dist_ai = abs(avg_glcm_contrast_ai - avg_glcm_contrast_real)
-    contrast_dist_warp = abs(avg_glcm_contrast_warp - avg_glcm_contrast_real)
-    contrast_winner = '✓ AI closer' if contrast_dist_ai < contrast_dist_warp else '✗ Warp closer'
-
-    energy_dist_ai = abs(avg_glcm_energy_ai - avg_glcm_energy_real)
-    energy_dist_warp = abs(avg_glcm_energy_warp - avg_glcm_energy_real)
-    energy_winner = '✓ AI closer' if energy_dist_ai < energy_dist_warp else '✗ Warp closer'
-
-    entropy_dist_ai = abs(avg_glcm_entropy_ai - avg_glcm_entropy_real)
-    entropy_dist_warp = abs(avg_glcm_entropy_warp - avg_glcm_entropy_real)
-    entropy_winner = '✓ AI closer' if entropy_dist_ai < entropy_dist_warp else '✗ Warp closer'
-
-    correlation_dist_ai = abs(avg_glcm_correlation_ai - avg_glcm_correlation_real)
-    correlation_dist_warp = abs(avg_glcm_correlation_warp - avg_glcm_correlation_real)
-    correlation_winner = '✓ AI closer' if correlation_dist_ai < correlation_dist_warp else '✗ Warp closer'
-
-    homogeneity_dist_ai = abs(avg_glcm_homogeneity_ai - avg_glcm_homogeneity_real)
-    homogeneity_dist_warp = abs(avg_glcm_homogeneity_warp - avg_glcm_homogeneity_real)
-    homogeneity_winner = '✓ AI closer' if homogeneity_dist_ai < homogeneity_dist_warp else '✗ Warp closer'
+    json_report_path = output_dir / 'evaluation_report.json'
+    with open(json_report_path, 'w', encoding='utf-8') as f:
+        json.dump(all_metrics, f, indent=2, ensure_ascii=False)
 
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write(f"# 模型评估报告 - {model_type}\n\n")
@@ -1435,28 +1543,37 @@ def run_model_evaluation(
         f.write(f"""
 ## 纹理质量分析
 
-| 指标 | Real COPD | AI Fused | Direct Warp | AI vs Warp | 改进幅度 |
-|------|-----------|----------|-------------|------------|----------|
-| 清晰度 (↑ 越高越好) | {avg_sharpness_real:.2f} | {avg_sharpness_ai:.2f} | {avg_sharpness_warp:.2f} | {sharpness_winner} | {sharpness_improve:+.1f}% |
-| 边界梯度 (↓ 越低越好) | {avg_boundary_real:.2f} | {avg_boundary_ai:.2f} | {avg_boundary_warp:.2f} | {boundary_winner} | {boundary_improve:+.1f}% |
-| GLCM 对比度 (↑ 越高越好) | {avg_glcm_contrast_real:.2f} | {avg_glcm_contrast_ai:.2f} | {avg_glcm_contrast_warp:.2f} | {contrast_winner} | Δ: AI={contrast_dist_ai:.2f}, Warp={contrast_dist_warp:.2f} |
-| GLCM 能量 (≈ Real 越近越好) | {avg_glcm_energy_real:.4f} | {avg_glcm_energy_ai:.4f} | {avg_glcm_energy_warp:.4f} | {energy_winner} | Δ: AI={energy_dist_ai:.4f}, Warp={energy_dist_warp:.4f} |
-| GLCM 熵 (↑ 越高越好) | {avg_glcm_entropy_real:.2f} | {avg_glcm_entropy_ai:.2f} | {avg_glcm_entropy_warp:.2f} | {entropy_winner} | Δ: AI={entropy_dist_ai:.2f}, Warp={entropy_dist_warp:.2f} |
-| GLCM 相关性 (≈ Real 越近越好) | {avg_glcm_correlation_real:.4f} | {avg_glcm_correlation_ai:.4f} | {avg_glcm_correlation_warp:.4f} | {correlation_winner} | Δ: AI={correlation_dist_ai:.4f}, Warp={correlation_dist_warp:.4f} |
-| GLCM 同质性 (≈ Real 越近越好) | {avg_glcm_homogeneity_real:.4f} | {avg_glcm_homogeneity_ai:.4f} | {avg_glcm_homogeneity_warp:.4f} | {homogeneity_winner} | Δ: AI={homogeneity_dist_ai:.4f}, Warp={homogeneity_dist_warp:.4f} |
+> **评估目标**：对比 AI 相较于 Embedded Template 的改进和优化。
+> ↑/↓ 指标按箭头方向直接比较数值；≈ 类指标以 Warp (Direct Warp) 为参照，越接近越好。
+
+| 指标 | Warp(Ref) | Embed | AI | Real COPD | AI vs Real COPD | AI vs Real COPD改进 | AI vs Embed | AI vs Embed改进 |
+|------|-----------|-------|------|-----------|-----------------|-------------------|-------------|----------------|
+| 清晰度 (↑) | {avg_sharpness_warp:.1f} | {avg_sharpness_real:.1f} | {avg_sharpness_ai:.1f} | {avg_sharpness_real_copd:.1f} | {s_r_win} | {s_r_imp:+.1f}% | {s_e_win} | {s_e_imp:+.1f}% |
+| 边界梯度 (↓) | {avg_boundary_warp:.2f} | {avg_boundary_real:.2f} | {avg_boundary_ai:.2f} | {avg_boundary_real_copd:.2f} | {b_r_win} | {b_r_imp:+.1f}% | {b_e_win} | {b_e_imp:+.1f}% |
+| GLCM 对比度 (↑) | {avg_glcm_contrast_warp:.4f} | {avg_glcm_contrast_real:.4f} | {avg_glcm_contrast_ai:.4f} | {avg_glcm_contrast_real_copd:.4f} | {gc_r_win} | {gc_r_imp:+.1f}% | {gc_e_win} | {gc_e_imp:+.1f}% |
+| GLCM 能量 (≈) | {avg_glcm_energy_warp:.4f} | {avg_glcm_energy_real:.4f} | {avg_glcm_energy_ai:.4f} | {avg_glcm_energy_real_copd:.4f} | {ge_r_win} | {ge_r_imp:+.1f}% | {ge_e_win} | {ge_e_imp:+.1f}% |
+| GLCM 熵 (↑) | {avg_glcm_entropy_warp:.4f} | {avg_glcm_entropy_real:.4f} | {avg_glcm_entropy_ai:.4f} | {avg_glcm_entropy_real_copd:.4f} | {gn_r_win} | {gn_r_imp:+.1f}% | {gn_e_win} | {gn_e_imp:+.1f}% |
+| GLCM 相关性 (≈) | {avg_glcm_correlation_warp:.4f} | {avg_glcm_correlation_real:.4f} | {avg_glcm_correlation_ai:.4f} | {avg_glcm_correlation_real_copd:.4f} | {gr_r_win} | {gr_r_imp:+.1f}% | {gr_e_win} | {gr_e_imp:+.1f}% |
+| GLCM 同质性 (≈) | {avg_glcm_homogeneity_warp:.4f} | {avg_glcm_homogeneity_real:.4f} | {avg_glcm_homogeneity_ai:.4f} | {avg_glcm_homogeneity_real_copd:.4f} | {gh_r_win} | {gh_r_imp:+.1f}% | {gh_e_win} | {gh_e_imp:+.1f}% |
+
+### 列说明：
+- **Warp(Ref)**: Direct Warp（直接配准基线），≈类指标的参照基准
+- **Embed**: Embedded Template（病灶嵌入模板），AI 需要改进和超越的目标
+- **AI vs Real COPD**: AI 融合是否优于真实 COPD 数据（↑/↓直接比值，≈比距离 Warp）
+- **AI vs Real COPD改进**: AI 相对 Real COPD 的改进幅度百分比
+- **AI vs Embed**: AI 融合是否优于 Embedded Template（核心评估维度）
+- **AI vs Embed改进**: AI 相对 Embed 的改进幅度百分比
 
 ### 指标解释：
-- **清晰度 (↑ 越高越好)**: 拉普拉斯方差越高表示纹理越清晰、细节越丰富。模糊会降低清晰度。
-- **边界梯度 (↓ 越低越好)**: 值越低表示病灶边界融合越平滑，无可见接缝。
-- **GLCM 对比度 (↑ 越高越好)**: 测量局部强度变化。对比度越高表示纹理细节越丰富；模糊会降低对比度。
-- **GLCM 能量 (≈ Real 越近越好)**: 测量纹理均匀性。越接近 Real COPD 表示纹理分布越真实。
-- **GLCM 熵 (↑ 越高越好)**: 测量纹理随机性/复杂度。熵越高表示纹理越丰富；模糊会降低熵。
-- **GLCM 相关性 (≈ Real 越近越好)**: 灰度级线性依赖性。越接近 Real COPD 表示空间模式越真实。
-- **GLCM 同质性 (≈ Real 越近越好)**: 分布接近对角线的程度。越接近 Real COPD 表示局部平滑度越真实。
+- **清晰度 (↑)**: 拉普拉斯方差，越高 = 纹理越清晰
+- **边界梯度 (↓)**: 越低 = 病灶边界融合越平滑
+- **GLCM 对比度 (↑)**: 局部强度变化，越高 = 纹理细节越丰富
+- **GLCM 能量 (≈)**: 纹理均匀性，越接近 Warp 越真实
+- **GLCM 熵 (↑)**: 纹理复杂度，越高 = 纹理越丰富
+- **GLCM 相关性 (≈)**: 灰度级线性依赖性，越接近 Warp 越真实
+- **GLCM 同质性 (≈)**: 分布集中度，越接近 Warp 越真实
 
-**图例**: ↑ 越高越好 = 值越大越好, ↓ 越低越好 = 值越小越好, ≈ Real 越近越好 = 越接近 Real COPD 越好
-
-> **注意**: Direct Warp 是以标准模板为基线（不经过 AI 纹理合成），反映了模板在病灶区域的原始纹理质量。AI Fused 的优势体现在模板基础上经 AI 合成后纹理更接近真实 COPD CT。
+**符号**: ↑ = 越大越好, ↓ = 越小越好, ≈ = 越接近 Warp 越好
 
 ![纹理质量雷达图](texture_quality_radar.png)
 """)
@@ -1548,126 +1665,203 @@ def get_roi_slice(mask_3d, context_size=32, view='axial'):
     return slice_idx, (y_start, y_end, x_start, x_end)
 
 
-def plot_comparison(img_a, title_a, img_b, title_b, mask, roi_coords, save_path, suptitle, view='axial', layout='vertical'):
+def plot_comparison(img_real, img_fused, mask, roi_coords, save_path, suptitle,
+                    view='axial', layout='vertical', img_native=None):
     """
-    绘制对比图（支持水平/垂直两种布局）
-    Plot comparison images with support for horizontal/vertical layouts
+    绘制5列对比图（全局视图 + ROI 放大视图），列布局如下：
+      第1列：COPD 原始 CT（配准前，Native 空间；若无则显示占位符）
+      第2列：Real COPD（配准到模板空间的 COPD 患者 CT）
+      第3列：AI 融合（模型生成结果）
+      第4列：差值图（|AI 融合 - Real COPD|，jet 热力叠加）
+      第5列：病变 Mask 叠加（叠加在 AI 融合图上）
 
     Args:
-        img_a: 图像 A (2D 切片) / Image A (2D slice)
-        title_a: 图像 A 标题 / Title for image A
-        img_b: 图像 B (2D 切片) / Image B (2D slice)
-        title_b: 图像 B 标题 / Title for image B
-        mask: mask 切片 / Mask slice
-        roi_coords: ROI 坐标 (y1, y2, x1, x2) / ROI coordinates
-        save_path: 保存路径 / Save path
-        suptitle: 总标题 / Main title
-        view: 视图类型 ('axial', 'coronal', 'sagittal') / View type
-        layout: 布局方式 / Layout mode
-            - 'horizontal': 左右布局，1行2列 (default) / Side-by-side, 1 row × 2 cols
-            - 'vertical': 上下布局，2行1列 / Stacked, 2 rows × 1 col
+        img_real    : 第2列，配准后 Real COPD，2D 切片
+        img_fused   : 第3列，AI 融合结果，2D 切片
+        mask        : 病变二值 Mask，2D 切片
+        roi_coords  : ROI 坐标 (y1, y2, x1, x2)
+        save_path   : 输出文件路径
+        suptitle    : 整图标题
+        view        : 视图类型 ('axial', 'coronal', 'sagittal')
+        layout      : 布局方式（'vertical' = 2行5列；'horizontal' = 5行2列）
+        img_native  : 第1列，COPD 原始 CT 切片（可为 None，为 None 时显示占位符）
     """
     import numpy as np
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    # 注入全局字体配置，确保中文和负号显示正常
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
 
     y1, y2, x1, x2 = roi_coords
-    roi_a = img_a[y1:y2, x1:x2]
-    roi_b = img_b[y1:y2, x1:x2]
-    roi_mask = mask[y1:y2, x1:x2]
 
-    # 计算差异 / Calculate difference
-    diff = np.abs(img_a - img_b)
+    # ---- 各列 ROI 切片 ----
+    roi_native  = img_native[y1:y2, x1:x2] if img_native is not None else None
+    roi_real    = img_real[y1:y2, x1:x2]    if img_real is not None else None
+    roi_fused   = img_fused[y1:y2, x1:x2]
+    roi_mask    = mask[y1:y2, x1:x2]
+
+    # ---- 第4列：差异图 |AI 融合 - Real COPD|（仅病灶区域内）----
+    mask_bool = mask > 0
+    if img_real is not None:
+        raw_diff = np.abs(img_fused.astype(float) - img_real.astype(float))
+        # 仅保留病灶区域内的差异，非病灶区域置零
+        diff = raw_diff * mask_bool.astype(float)
+    else:
+        diff = np.zeros_like(img_fused, dtype=float)
     roi_diff = diff[y1:y2, x1:x2]
+    # 动态计算色条上限：仅基于病灶内像素的分位数
+    _diff_lesion = diff[mask_bool]
+    _diff_lesion_nonzero = _diff_lesion[_diff_lesion > 0] if _diff_lesion.size > 0 else np.array([])
+    if _diff_lesion_nonzero.size > 0:
+        # 使用病灶内第 97.5 百分位 × 1.5，聚焦病灶差异分布
+        diff_vmax = max(float(np.percentile(_diff_lesion_nonzero, 97.5)) * 1.5, 10.0)
+    else:
+        diff_vmax = 50.0
 
     view_label = view.capitalize()
 
-    # 根据布局方式设置图形尺寸和网格
-    # Set figure size and grid based on layout mode
+    # ---- 布局参数：5列 ----
+    N_COLS = 5
     if layout == 'horizontal':
-        # 水平布局（默认）：4行2列，全局视图在左列，ROI在右列
-        # Horizontal layout (default): 4 rows × 2 cols
-        # Left column: Global views (Image A, Image B, Diff, Mask)
-        # Right column: ROI zoomed views
-        fig = plt.figure(figsize=(10, 20), dpi=150)
-        gs = fig.add_gridspec(4, 2, wspace=0.15, hspace=0.15)
-        pos_global = [(0, 0), (1, 0), (2, 0), (3, 0)]  # 左列：全局视图
-        pos_roi = [(0, 1), (1, 1), (2, 1), (3, 1)]      # 右列：ROI 放大
+        fig = plt.figure(figsize=(15, 30), dpi=300)
+        gs  = fig.add_gridspec(N_COLS, 2, wspace=0.12, hspace=0.15)
+        pos_global = [(r, 0) for r in range(N_COLS)]
+        pos_roi    = [(r, 1) for r in range(N_COLS)]
     else:
-        # 垂直布局：2行4列，全局视图在上行，ROI在下行
-        # Vertical layout: 2 rows × 4 cols
-        # Top row: Global views (Image A, Image B, Diff, Mask)
-        # Bottom row: ROI zoomed views
-        fig = plt.figure(figsize=(20, 10), dpi=150)
-        gs = fig.add_gridspec(2, 4, wspace=0.15, hspace=0.2)
-        pos_global = [(0, 0), (0, 1), (0, 2), (0, 3)]  # 上行：全局视图
-        pos_roi = [(1, 0), (1, 1), (1, 2), (1, 3)]      # 下行：ROI 放大
+        fig = plt.figure(figsize=(30, 12), dpi=300)
+        gs  = fig.add_gridspec(2, N_COLS, wspace=0.12, hspace=0.22)
+        pos_global = [(0, c) for c in range(N_COLS)]
+        pos_roi    = [(1, c) for c in range(N_COLS)]
 
-    # ========== Row 1: Global View ==========
-    # Col 1: Image A
+    # ========================================================
+    # 辅助函数
+    # ========================================================
+    def _add_roi_rect(ax):
+        rect = mpatches.Rectangle(
+            (y1, x1), y2 - y1, x2 - x1,
+            linewidth=2, edgecolor='yellow', facecolor='none'
+        )
+        ax.add_patch(rect)
+
+    def _roi_border(ax, color='yellow'):
+        for spine in ax.spines.values():
+            spine.set_edgecolor(color)
+            spine.set_linewidth(2.5)
+
+    # ========================================================
+    # ===== 第1行（全局视图）=====
+    # ========================================================
+
+    # 列1：COPD 原始 CT（配准前）
     ax1 = fig.add_subplot(gs[pos_global[0]])
-    ax1.imshow(apply_lung_window(img_a).T, cmap='gray', origin='lower')
-    ax1.set_title(title_a, fontsize=11, fontweight='bold')
-    rect = mpatches.Rectangle((y1, x1), y2-y1, x2-x1, linewidth=2, edgecolor='yellow', facecolor='none')
-    ax1.add_patch(rect)
+    if img_native is not None:
+        ax1.imshow(apply_lung_window(img_native).T, cmap='gray', origin='lower')
+        _add_roi_rect(ax1)
+    else:
+        ax1.text(0.5, 0.5, 'Native CT\nN/A', ha='center', va='center',
+                 transform=ax1.transAxes, fontsize=16, color='gray')
+    ax1.set_title("COPD 原始 CT", fontsize=20, fontweight='bold')
     ax1.axis('off')
 
-    # Col 2: Image B
+    # 列2：Real COPD（配准后）
     ax2 = fig.add_subplot(gs[pos_global[1]])
-    ax2.imshow(apply_lung_window(img_b).T, cmap='gray', origin='lower')
-    ax2.set_title(title_b, fontsize=11, fontweight='bold')
+    if img_real is not None:
+        ax2.imshow(apply_lung_window(img_real).T, cmap='gray', origin='lower')
+        _add_roi_rect(ax2)
+    else:
+        ax2.text(0.5, 0.5, 'N/A', ha='center', va='center',
+                 transform=ax2.transAxes, fontsize=16, color='gray')
+    ax2.set_title("Real COPD（配准后）", fontsize=20, fontweight='bold')
     ax2.axis('off')
 
-    # Col 3: Difference Heatmap
+    # 列3：AI 融合
     ax3 = fig.add_subplot(gs[pos_global[2]])
-    bg = apply_lung_window(img_a).T
-    ax3.imshow(bg, cmap='gray', alpha=0.5, origin='lower')
-    im = ax3.imshow(diff.T, cmap='jet', alpha=0.6, origin='lower', vmin=0, vmax=500)
-    ax3.set_title("Difference Map", fontsize=11)
-    plt.colorbar(im, ax=ax3, fraction=0.046, pad=0.04)
+    ax3.imshow(apply_lung_window(img_fused).T, cmap='gray', origin='lower')
+    ax3.set_title("AI 融合", fontsize=20, fontweight='bold')
+    _add_roi_rect(ax3)
     ax3.axis('off')
 
-    # Col 4: Mask Overlay
+    # 列4：差异图（|AI - Real COPD| 仅病灶区域内）
     ax4 = fig.add_subplot(gs[pos_global[3]])
-    ax4.imshow(apply_lung_window(img_b).T, cmap='gray', origin='lower')
-    ax4.imshow(mask.T, cmap='Reds', alpha=0.4, origin='lower')
-    ax4.set_title("Lesion Mask Overlay", fontsize=11)
+    if img_real is not None:
+        ax4.imshow(apply_lung_window(img_real).T, cmap='gray', alpha=0.5, origin='lower')
+    im4 = ax4.imshow(diff.T, cmap='jet', alpha=0.7, origin='lower', vmin=0, vmax=diff_vmax)
+    ax4.set_title("差异图 (病灶内 AI-Real)", fontsize=20, fontweight='bold')
+    divider4 = make_axes_locatable(ax4)
+    cax4 = divider4.append_axes("right", size="5%", pad=0.05)
+    cbar4 = plt.colorbar(im4, cax=cax4)
+    cbar4.ax.tick_params(labelsize=11)
+    _add_roi_rect(ax4)
     ax4.axis('off')
 
-    # ========== Row 2: ROI Zoom ==========
-    # Col 1: ROI Image A
-    ax5 = fig.add_subplot(gs[pos_roi[0]])
-    ax5.imshow(apply_lung_window(roi_a).T, cmap='gray', origin='lower')
-    ax5.set_title(f"ROI: {title_a}", fontsize=10)
-    for spine in ax5.spines.values():
-        spine.set_edgecolor('yellow')
-        spine.set_linewidth(2)
+    # 列5：病变 Mask 叠加
+    ax5 = fig.add_subplot(gs[pos_global[4]])
+    ax5.imshow(apply_lung_window(img_fused).T, cmap='gray', origin='lower')
+    ax5.imshow(mask.T, cmap='Reds', alpha=0.45, origin='lower')
+    ax5.set_title("病变 Mask 叠加", fontsize=20, fontweight='bold')
+    _add_roi_rect(ax5)
     ax5.axis('off')
 
-    # Col 2: ROI Image B
-    ax6 = fig.add_subplot(gs[pos_roi[1]])
-    ax6.imshow(apply_lung_window(roi_b).T, cmap='gray', origin='lower')
-    ax6.set_title(f"ROI: {title_b}", fontsize=10)
+    # ========================================================
+    # ===== 第2行（ROI 放大视图）=====
+    # ========================================================
+
+    # ROI列1：COPD 原始 CT
+    ax6 = fig.add_subplot(gs[pos_roi[0]])
+    if roi_native is not None:
+        ax6.imshow(apply_lung_window(roi_native).T, cmap='gray', origin='lower')
+    else:
+        ax6.text(0.5, 0.5, 'Native CT\nN/A', ha='center', va='center',
+                 transform=ax6.transAxes, fontsize=14, color='gray')
+    ax6.set_title("ROI：COPD 原始 CT", fontsize=19, fontweight='bold')
+    _roi_border(ax6)
     ax6.axis('off')
 
-    # Col 3: ROI Difference
-    ax7 = fig.add_subplot(gs[pos_roi[2]])
-    roi_bg = apply_lung_window(roi_a).T
-    ax7.imshow(roi_bg, cmap='gray', alpha=0.5, origin='lower')
-    ax7.imshow(roi_diff.T, cmap='jet', alpha=0.6, origin='lower', vmin=0, vmax=500)
-    ax7.set_title("ROI: Difference", fontsize=10)
+    # ROI列2：Real COPD（配准后）
+    ax7 = fig.add_subplot(gs[pos_roi[1]])
+    if roi_real is not None:
+        ax7.imshow(apply_lung_window(roi_real).T, cmap='gray', origin='lower')
+    else:
+        ax7.text(0.5, 0.5, 'N/A', ha='center', va='center',
+                 transform=ax7.transAxes, fontsize=14, color='gray')
+    ax7.set_title("ROI：Real COPD", fontsize=19, fontweight='bold')
+    _roi_border(ax7)
     ax7.axis('off')
 
-    # Col 4: ROI Mask Overlay
-    ax8 = fig.add_subplot(gs[pos_roi[3]])
-    ax8.imshow(apply_lung_window(roi_b).T, cmap='gray', origin='lower')
-    ax8.imshow(roi_mask.T, cmap='Reds', alpha=0.4, origin='lower')
-    ax8.set_title("ROI: Mask Overlay", fontsize=10)
+    # ROI列3：AI 融合
+    ax8 = fig.add_subplot(gs[pos_roi[2]])
+    ax8.imshow(apply_lung_window(roi_fused).T, cmap='gray', origin='lower')
+    ax8.set_title("ROI：AI 融合", fontsize=19, fontweight='bold')
+    _roi_border(ax8)
     ax8.axis('off')
 
-    plt.suptitle(f"{suptitle} [{view_label}]", fontsize=14, y=0.98)
-    plt.savefig(save_path, bbox_inches='tight', pad_inches=0.1)
-    plt.close()
+    # ROI列4：差异图（|AI - Real COPD| 仅病灶区域内）
+    ax9 = fig.add_subplot(gs[pos_roi[3]])
+    if roi_real is not None:
+        ax9.imshow(apply_lung_window(roi_real).T, cmap='gray', alpha=0.5, origin='lower')
+    im9 = ax9.imshow(roi_diff.T, cmap='jet', alpha=0.7, origin='lower', vmin=0, vmax=diff_vmax)
+    ax9.set_title("ROI: 差异图 (病灶内)", fontsize=19, fontweight='bold')
+    divider9 = make_axes_locatable(ax9)
+    cax9 = divider9.append_axes("right", size="5%", pad=0.05)
+    cbar9 = plt.colorbar(im9, cax=cax9)
+    cbar9.ax.tick_params(labelsize=11)
+    _roi_border(ax9)
+    ax9.axis('off')
+
+    # ROI列5：病变 Mask 叠加
+    ax10 = fig.add_subplot(gs[pos_roi[4]])
+    ax10.imshow(apply_lung_window(roi_fused).T, cmap='gray', origin='lower')
+    ax10.imshow(roi_mask.T, cmap='Reds', alpha=0.45, origin='lower')
+    ax10.set_title("ROI：病变 Mask 叠加", fontsize=19, fontweight='bold')
+    _roi_border(ax10)
+    ax10.axis('off')
+
+    plt.suptitle(f"{suptitle} [{view_label}]", fontsize=20, fontweight='bold', y=0.995)
+    plt.savefig(save_path, bbox_inches='tight', pad_inches=0.1, dpi=300)
+    plt.close(fig)
 
 
 def plot_histogram(data_dict, save_path, title):
@@ -1684,6 +1878,10 @@ def plot_histogram(data_dict, save_path, title):
     import numpy as np
     import matplotlib.pyplot as plt
 
+    # 注入全局字体配置，确保中文和负号显示正常
+    # plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans']
+    # plt.rcParams['axes.unicode_minus'] = False
+
     # 设置专业风格（兼容不同版本的 matplotlib）
     try:
         plt.style.use('seaborn-v0_8-whitegrid')
@@ -1694,14 +1892,14 @@ def plot_histogram(data_dict, save_path, title):
             pass  # 使用默认样式
 
     # 创建图形：左侧直方图 + 右侧文本框
-    fig = plt.figure(figsize=(14, 6), dpi=150)
+    fig = plt.figure(figsize=(16, 8), dpi=300)
     gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.3)
     ax_hist = fig.add_subplot(gs[0, 0])
     ax_text = fig.add_subplot(gs[0, 1])
 
     # 颜色方案（专业配色）
     colors = {
-        'Template': '#3498db',      # 蓝色
+        'Healthy Template': '#3498db',      # 蓝色
         'AI Fused': '#e74c3c',      # 红色
         'Real COPD': '#27ae60'      # 绿色
     }
@@ -1733,25 +1931,26 @@ def plot_histogram(data_dict, save_path, title):
         }
 
     # 添加肺气肿阈值参考线
-    ax_hist.axvline(x=-950, color='#2c3e50', linestyle='--', linewidth=2, alpha=0.8, label='Emphysema threshold (-950)')
+    ax_hist.axvline(x=-950, color='#2c3e50', linestyle='--', linewidth=2, alpha=0.8, label='Emphysema Threshold (-950)')
 
     # 设置直方图坐标轴
     ax_hist.set_xlim(-1024, 0)
-    ax_hist.set_xlabel("HU Value", fontsize=12, fontweight='bold')
-    ax_hist.set_ylabel("Density", fontsize=12, fontweight='bold')
-    ax_hist.set_title("HU Distribution in 3D Lesion Volume", fontsize=13, fontweight='bold')
-    ax_hist.legend(loc='upper right', fontsize=9, framealpha=0.9)
+    ax_hist.set_xlabel("HU Value", fontsize=16, fontweight='bold')
+    ax_hist.set_ylabel("Density", fontsize=16, fontweight='bold')
+    ax_hist.set_title("HU Distribution in 3D Lesion", fontsize=20, fontweight='bold')
+    ax_hist.legend(loc='upper right', fontsize=14, framealpha=0.9)
     ax_hist.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
     ax_hist.set_axisbelow(True)
+    ax_hist.tick_params(axis='both', which='major', labelsize=14)
 
     # 构建右侧统计信息文本框（参考上传图片格式）
-    text_lines = ["HU Value Statistics (3D Lesion Volume)", "=" * 42, ""]
+    text_lines = ["HU Statistics (3D Lesion Volume)", "=" * 42, ""]
 
-    # Real COPD CT 统计
+    # Real COPD 统计
     if 'Real COPD' in stats_data:
         s = stats_data['Real COPD']
         text_lines.extend([
-            "Real COPD CT:",
+            "Real COPD:",
             f"  Mean HU: {s['mean']:.1f}",
             f"  Std HU: {s['std']:.1f}",
             f"  Min HU: {s['min']:.1f}",
@@ -1774,8 +1973,8 @@ def plot_histogram(data_dict, save_path, title):
         ])
 
     # Template 统计（如果存在）
-    if 'Template' in stats_data:
-        s = stats_data['Template']
+    if 'Healthy Template' in stats_data:
+        s = stats_data['Healthy Template']
         text_lines.extend([
             "Healthy Template:",
             f"  Mean HU: {s['mean']:.1f}",
@@ -1791,23 +1990,23 @@ def plot_histogram(data_dict, save_path, title):
         mean_diff = stats_data['AI Fused']['mean'] - stats_data['Real COPD']['mean']
         emph_diff = stats_data['AI Fused']['emphysema_ratio'] - stats_data['Real COPD']['emphysema_ratio']
         text_lines.extend([
-            "Difference:",
-            f"  Mean HU Diff: {mean_diff:.1f}",
-            f"  Emphysema Diff: {emph_diff:.1f}%"
+            "Difference (AI vs Real COPD):",
+            f"  Mean HU Diff: {mean_diff:+.1f}",
+            f"  Emphysema Diff: {emph_diff:+.1f}%"
         ])
 
     # 在右侧子图显示文本（无背景填充，纯文字）
     ax_text.axis('off')
     text_str = '\n'.join(text_lines)
     ax_text.text(0.05, 0.95, text_str, transform=ax_text.transAxes,
-                 fontsize=9, verticalalignment='top', fontfamily='monospace')
+                 fontsize=14, verticalalignment='top', fontfamily='monospace')
 
     # 设置总标题
-    fig.suptitle(title, fontsize=14, fontweight='bold', y=0.98)
+    fig.suptitle(title, fontsize=20, fontweight='bold', y=0.98)
 
     # 保存
-    plt.savefig(save_path, bbox_inches='tight', facecolor='white', edgecolor='none')
-    plt.close()
+    plt.savefig(save_path, bbox_inches='tight', facecolor='white', edgecolor='none', dpi=300)
+    plt.close(fig)
     plt.style.use('default')  # 恢复默认样式
 
 
@@ -1840,7 +2039,7 @@ def run_result_visualization(
 
     try:
         import nibabel as nib
-        import numpy as np  # noqa: F401 - 用于检查依赖
+        import numpy as np
     except ImportError as e:
         logger.error(f"  ✗ 缺少依赖: {e}")
         return False
@@ -1848,9 +2047,13 @@ def run_result_visualization(
     paths = config.get('paths', {})
     mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
     atlas_dir = Path(paths.get('atlas', 'data/02_atlas'))
+    cleaned_dir = Path(paths.get('cleaned_data', 'data/01_cleaned'))
     fused_dir = Path(paths.get('final_viz', 'data/04_final_viz')) / model_type
     output_dir = Path(f'results/{model_type}')  # 合并后的输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 原始 COPD CT（配准前 Native CT）目录
+    native_ct_dir = cleaned_dir / 'copd_clean'
 
     template_path = atlas_dir / 'standard_template.nii.gz'
 
@@ -1876,18 +2079,21 @@ def run_result_visualization(
     # 加载模板
     template_data = nib.load(str(template_path)).get_fdata()
 
-    model_names = {
-        'unet': '3D U-Net',
-        'partial_conv': 'Partial Conv',
-        'patchgan': 'PatchGAN'
-    }
-    model_name = model_names.get(model_type, model_type)
+    # model_names = {
+    #     'unet': '3D U-Net',
+    #     'partial_conv': 'Partial Conv',
+    #     'patchgan': 'PatchGAN'
+    # }
+    # model_name = model_names.get(model_type, model_type)
 
     success_count = 0
     for fused_path in fused_files:
         patient_id = fused_path.name.replace('_fused.nii.gz', '')
         mask_path = mapped_dir / patient_id / f"{patient_id}_warped_lesion.nii.gz"
         real_path = mapped_dir / patient_id / f"{patient_id}_warped.nii.gz"
+
+        # 原始 COPD CT（配准前 Native CT）
+        native_path = native_ct_dir / f"{patient_id}_clean.nii.gz"
 
         if not mask_path.exists():
             logger.warning(f"  ⚠ 跳过 {patient_id}: mask 不存在")
@@ -1903,6 +2109,11 @@ def run_result_visualization(
             mask_data = nib.load(str(mask_path)).get_fdata()
             real_data = nib.load(str(real_path)).get_fdata() if real_path.exists() else None
 
+            # 加载原始 COPD CT（配准前）
+            native_data = None
+            if native_path.exists():
+                native_data = nib.load(str(native_path)).get_fdata()
+
             files_generated = 0
 
             # 2. 为每个视图生成可视化
@@ -1910,42 +2121,63 @@ def run_result_visualization(
                 # 获取该视图的最佳切片和 ROI
                 slice_idx, roi_coords = get_roi_slice(mask_data, context_size=48, view=view)
 
-                # 提取 2D 切片
+                # 提取 2D 切片（模板空间：fused / mask / real）
                 if view == 'axial':
-                    template_slice = template_data[:, :, slice_idx]
-                    fused_slice = fused_data[:, :, slice_idx]
-                    mask_slice = mask_data[:, :, slice_idx]
-                    real_slice = real_data[:, :, slice_idx] if real_data is not None else None
+                    fused_slice    = fused_data[:, :, slice_idx]
+                    mask_slice     = mask_data[:, :, slice_idx]
+                    real_slice     = real_data[:, :, slice_idx] if real_data is not None else None
                 elif view == 'coronal':
-                    template_slice = template_data[:, slice_idx, :]
-                    fused_slice = fused_data[:, slice_idx, :]
-                    mask_slice = mask_data[:, slice_idx, :]
-                    real_slice = real_data[:, slice_idx, :] if real_data is not None else None
+                    fused_slice    = fused_data[:, slice_idx, :]
+                    mask_slice     = mask_data[:, slice_idx, :]
+                    real_slice     = real_data[:, slice_idx, :] if real_data is not None else None
                 else:  # sagittal
-                    template_slice = template_data[slice_idx, :, :]
-                    fused_slice = fused_data[slice_idx, :, :]
-                    mask_slice = mask_data[slice_idx, :, :]
-                    real_slice = real_data[slice_idx, :, :] if real_data is not None else None
+                    fused_slice    = fused_data[slice_idx, :, :]
+                    mask_slice     = mask_data[slice_idx, :, :]
+                    real_slice     = real_data[slice_idx, :, :] if real_data is not None else None
 
-                # 生成图像 1：Generation（Template vs Fused）
+                # 提取原始 COPD CT 切片（配准前 Native 空间）
+                # 由于 Native CT 和模板空间维度可能不同，按比例映射切片索引
+                native_slice = None
+                if native_data is not None:
+                    if view == 'axial':
+                        native_z = native_data.shape[2]
+                        template_z = template_data.shape[2]
+                        native_idx = int(slice_idx * native_z / template_z)
+                        native_idx = min(native_idx, native_z - 1)
+                        native_slice = native_data[:, :, native_idx]
+                    elif view == 'coronal':
+                        native_z = native_data.shape[1]
+                        template_z = template_data.shape[1]
+                        native_idx = int(slice_idx * native_z / template_z)
+                        native_idx = min(native_idx, native_z - 1)
+                        native_slice = native_data[:, native_idx, :]
+                    else:  # sagittal
+                        native_z = native_data.shape[0]
+                        template_z = template_data.shape[0]
+                        native_idx = int(slice_idx * native_z / template_z)
+                        native_idx = min(native_idx, native_z - 1)
+                        native_slice = native_data[native_idx, :, :]
+
+                # 生成图像 1：5 列全对比图（viz_1_generation）
+                # 新布局：原始CT | Real COPD | AI 融合 | 差异图(AI-Real) | Mask叠加
                 plot_comparison(
-                    template_slice, "Healthy Template",
-                    fused_slice, f"AI Fused ({model_name})",
+                    real_slice, fused_slice,
                     mask_slice, roi_coords,
                     patient_output_dir / f"{patient_id}_viz_1_generation_{view}.png",
-                    f"{patient_id} - Generation Effectiveness",
-                    view=view
+                    f"{patient_id} - 生成效果五列对比",
+                    view=view,
+                    img_native=native_slice
                 )
                 files_generated += 1
 
-                # 生成图像 2：Realism（Real vs Fused）- 仅当真实数据存在时
+                # 生成图像 2：Realism（Real vs Fused）
+                # 复用 plot_comparison 接口，不再传 img_native
                 if real_slice is not None:
                     plot_comparison(
-                        real_slice, "Real COPD",
-                        fused_slice, f"AI Fused ({model_name})",
+                        real_slice, fused_slice,
                         mask_slice, roi_coords,
                         patient_output_dir / f"{patient_id}_viz_2_realism_{view}.png",
-                        f"{patient_id} - Fidelity Analysis",
+                        f"{patient_id} - 真实度分析",
                         view=view
                     )
                     files_generated += 1
@@ -1955,16 +2187,20 @@ def run_result_visualization(
             mask_bool = mask_data > 0  # 完整 3D 病灶 mask
 
             hist_data = {
-                'Template': template_data[mask_bool],
+                'Healthy Template': template_data[mask_bool],
                 'AI Fused': fused_data[mask_bool],
             }
             if real_data is not None:
+                # Real COPD 在 mask 区域内的 HU 值就是 real_data 本身
+                # （因为 embedded = template.copy(); embedded[mask] = real[mask]
+                #   → embedded[mask] ≡ real[mask]）
+                # 无需拷贝整个 3D 体积，直接取 real_data[mask_bool] 即可
                 hist_data['Real COPD'] = real_data[mask_bool]
 
             plot_histogram(
                 hist_data,
                 patient_output_dir / f"{patient_id}_viz_3_histogram.png",
-                f"{patient_id} - HU Distribution in 3D Lesion Volume"
+                f"{patient_id} - HU Distribution in 3D Lesion"
             )
             files_generated += 1
 

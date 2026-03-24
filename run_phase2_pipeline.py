@@ -141,13 +141,13 @@ def run_environment_check(logger: logging.Logger) -> bool:
     logger.info("=" * 60)
     logger.info("步骤 1: 环境检查")
     logger.info("=" * 60)
-    
+
     checks = [
         ("GPU", check_gpu),
         ("TotalSegmentator", check_totalsegmentator),
         ("ANTsPy", check_antspy),
     ]
-    
+
     all_ok = True
     for name, check_func in checks:
         ok, msg = check_func()
@@ -155,12 +155,12 @@ def run_environment_check(logger: logging.Logger) -> bool:
         logger.info(f"  {status} {name}: {msg}")
         if not ok and name in ["GPU", "TotalSegmentator"]:
             all_ok = False
-    
+
     if all_ok:
         logger.info("环境检查通过")
     else:
         logger.warning("环境检查未完全通过，将使用备选方案")
-    
+
     return all_ok
 
 
@@ -389,18 +389,18 @@ def run_quality_check(config: dict, logger: logging.Logger,
     else:
         clean_files = [f for f in all_clean if '_exp' not in f.stem]
         mask_files  = [f for f in all_mask  if '_exp' not in f.stem]
-    
+
     logger.info(f"  Clean 文件: {len(clean_files)}")
     logger.info(f"  Mask 文件: {len(mask_files)}")
-    
+
     if len(clean_files) == 0:
         logger.error("未找到分割结果")
         return False, 0
-    
+
     # 检查配对
     if len(clean_files) != len(mask_files):
         logger.warning(f"  文件数不匹配: clean={len(clean_files)}, mask={len(mask_files)}")
-    
+
     # 检查文件大小
     valid_count = 0
     for clean_file in clean_files:
@@ -409,7 +409,7 @@ def run_quality_check(config: dict, logger: logging.Logger,
             valid_count += 1
         else:
             logger.warning(f"  文件过小: {clean_file.name} ({size_mb:.1f} MB)")
-    
+
     logger.info(f"  有效文件: {valid_count}/{len(clean_files)}")
     logger.info("质量检查完成")
 
@@ -461,13 +461,14 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
 
     cleaned_dir = Path(config['paths']['cleaned_data'])
     atlas_dir   = Path(config['paths']['atlas'])
+    suffix = '_exp' if use_expiration else ''
 
     input_dir = cleaned_dir / 'normal_clean'
     mask_dir  = cleaned_dir / 'normal_mask'
     atlas_dir.mkdir(parents=True, exist_ok=True)
 
     # 检查模板文件（如果跳过构建）
-    template_file = atlas_dir / 'standard_template.nii.gz'
+    template_file = atlas_dir / f'standard_template{suffix}.nii.gz'
     if skip_template_build:
         if not template_file.exists():
             logger.error(f"无法跳过模板构建: 模板文件不存在 {template_file}")
@@ -516,7 +517,9 @@ def run_atlas_construction(config: dict, logger: logging.Logger,
             num_images=max_subjects,
             skip_evaluation=False,
             quick_test=quick_test,
-            skip_template_build=skip_template_build  # 传递跳过参数
+            skip_template_build=skip_template_build,
+            use_expiration=use_expiration,
+            filename_suffix=suffix,
         )
 
         elapsed = time.time() - start_time
@@ -568,16 +571,17 @@ def run_result_validation(config: dict, logger: logging.Logger) -> bool:
     logger.info("=" * 60)
 
     atlas_dir = Path(config['paths']['atlas'])
+    suffix = '_exp' if config.get('_use_expiration', False) else ''
 
     # 检查必要文件
     required_files = [
-        "standard_template.nii.gz",
-        "standard_mask.nii.gz",  # 修正：实际生成的文件名是 standard_mask.nii.gz
+        f"standard_template{suffix}.nii.gz",
+        f"standard_mask{suffix}.nii.gz",
     ]
 
     optional_files = [
-        "atlas_evaluation_report.json",
-        "template_metadata.json",
+        f"atlas_evaluation_report{suffix}.json",
+        "template_metadata.json" if not suffix else f"template_metadata{suffix}.json",
     ]
 
     all_ok = True
@@ -598,7 +602,7 @@ def run_result_validation(config: dict, logger: logging.Logger) -> bool:
             logger.info(f"  - {fname} (可选)")
 
     # 读取评估报告
-    report_file = atlas_dir / "atlas_evaluation_report.json"
+    report_file = atlas_dir / f"atlas_evaluation_report{suffix}.json"
     if report_file.exists():
         try:
             with open(report_file, 'r') as f:
@@ -762,13 +766,14 @@ def main():
 
         # 检查模板文件
         atlas_dir = Path(config['paths']['atlas'])
+        suffix = '_exp' if args.expiration else ''
         required_files = {
-            "template": atlas_dir / "standard_template.nii.gz",
-            "mask": atlas_dir / "standard_mask.nii.gz",
+            "template": atlas_dir / f"standard_template{suffix}.nii.gz",
+            "mask": atlas_dir / f"standard_mask{suffix}.nii.gz",
         }
         optional_files = {
-            "lobes": atlas_dir / "standard_lung_lobes_labeled.nii.gz",
-            "trachea": atlas_dir / "standard_trachea_mask.nii.gz",
+            "lobes": atlas_dir / f"standard_lung_lobes_labeled{suffix}.nii.gz",
+            "trachea": atlas_dir / f"standard_trachea_mask{suffix}.nii.gz",
         }
 
         logger.info("")
@@ -810,13 +815,14 @@ def main():
                 trachea_mask_path=trachea_file if trachea_file.exists() else None,
                 lobes_mask_path=lobes_file if lobes_file.exists() else None,
                 output_dir=viz_dir,
-                output_prefix="atlas_complete"
+                output_prefix="atlas_complete_exp" if suffix else "atlas_complete"
             )
 
             if viz_success:
                 logger.info("")
                 logger.info("✅ 可视化生成成功:")
-                for png in sorted(viz_dir.glob("atlas_complete_view_*.png")):
+                viz_pattern = "atlas_complete_exp_view_*.png" if suffix else "atlas_complete_view_*.png"
+                for png in sorted(viz_dir.glob(viz_pattern)):
                     logger.info(f"  - {png}")
             else:
                 logger.error("❌ 可视化生成失败")
@@ -871,6 +877,7 @@ def main():
     if skip_template_build:
         logger.info(f"跳过模板构建: 是（仅生成气管树模板）")
     logger.info(f"设备: {args.device}")
+    config['_use_expiration'] = use_expiration
     if args.force:
         logger.info(f"覆盖模式: 是")
     if args.limit:
@@ -950,10 +957,11 @@ def main():
 
     # 输出结果摘要
     atlas_dir = Path(config['paths']['atlas'])
-    template_file = atlas_dir / "standard_template.nii.gz"
-    mask_file = atlas_dir / "standard_mask.nii.gz"
-    trachea_file = atlas_dir / "standard_trachea_mask.nii.gz"
-    lobes_file = atlas_dir / "standard_lung_lobes_labeled.nii.gz"
+    suffix = '_exp' if use_expiration else ''
+    template_file = atlas_dir / f"standard_template{suffix}.nii.gz"
+    mask_file = atlas_dir / f"standard_mask{suffix}.nii.gz"
+    trachea_file = atlas_dir / f"standard_trachea_mask{suffix}.nii.gz"
+    lobes_file = atlas_dir / f"standard_lung_lobes_labeled{suffix}.nii.gz"
     viz_dir = atlas_dir / "visualizations"
 
     logger.info("")
@@ -980,11 +988,12 @@ def main():
                 trachea_mask_path=trachea_file if trachea_file.exists() else None,
                 lobes_mask_path=lobes_file if lobes_file.exists() else None,
                 output_dir=viz_dir,
-                output_prefix="atlas_complete"
+                output_prefix="atlas_complete_exp" if suffix else "atlas_complete"
             )
             if viz_success:
                 logger.info(f"✓ 可视化已生成:")
-                for png in viz_dir.glob("atlas_complete_view_*.png"):
+                viz_pattern = "atlas_complete_exp_view_*.png" if suffix else "atlas_complete_view_*.png"
+                for png in viz_dir.glob(viz_pattern):
                     logger.info(f"  - {png}")
             else:
                 logger.warning("⚠ 可视化生成失败")

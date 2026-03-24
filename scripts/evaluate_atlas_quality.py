@@ -277,7 +277,7 @@ class MorphologyMetrics:
             'airway':     (trachea_data > 0).astype(np.uint8),
         }
 
-        results = {}
+        results: Dict[str, float] = {}
         for name, mask in structures.items():
             nvox = int(mask.sum())
             vol_cc = round(nvox * voxel_vol_cc, 2)
@@ -374,16 +374,16 @@ class AtlasVisualizer:
         angles += angles[:1]
         values = scores + scores[:1]
 
-        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw=dict(polar=True))
+        fig, ax = plt.subplots(figsize=(12, 12), subplot_kw=dict(polar=True))
         ax.plot(angles, values, 'o-', linewidth=2.5, color='#2980b9', markersize=10)
         ax.fill(angles, values, alpha=0.25, color='#3498db')
         ax.set_xticks(angles[:-1])
-        ax.set_xticklabels(labels, fontsize=11, fontweight='bold')
+        ax.set_xticklabels(labels, fontsize=14, fontweight='bold')
         ax.set_ylim(0, 1.05)
         ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
-        ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=9)
+        ax.set_yticklabels(['0.2', '0.4', '0.6', '0.8', '1.0'], fontsize=12)
         ax.set_title('Digital Twin Atlas Quality Radar\n(3 Dimensions, 7 Metrics)',
-                      fontsize=16, fontweight='bold', pad=30)
+                      fontsize=20, fontweight='bold', pad=30)
 
         # 双层标注: 原始值 (红, 主标注) + 归一化分数 (灰, 次标注)
         for i in range(N):
@@ -393,12 +393,12 @@ class AtlasVisualizer:
             color = '#888888' if unavailable[i] else '#c0392b'
             suffix = ' (N/A)' if unavailable[i] else ''
             ax.annotate(f'{raw_strs[i]}{suffix}', xy=(angle, val),
-                        fontsize=10, ha='center', va='bottom',
+                        fontsize=14, ha='center', va='bottom',
                         color=color, fontweight='bold')
             # 归一化分数作为次标注 (灰色斜体, 向外偏移)
             offset = min(val + 0.13, 1.02)
             ax.annotate(f'score:{val:.2f}', xy=(angle, offset),
-                        fontsize=8, ha='center', va='bottom',
+                        fontsize=12, ha='center', va='bottom',
                         color='#7f8c8d', fontstyle='italic')
 
         # 如果提供了群体均值指标，叠加绘制对比基准线
@@ -434,57 +434,80 @@ class AtlasVisualizer:
                                        marker='o', markersize=7, linestyle='--',
                                        label='群体样本均值'))
         ax.legend(handles=handles, loc='upper right',
-                  bbox_to_anchor=(1.3, 1.1), fontsize=10)
+                  bbox_to_anchor=(1.3, 1.1), fontsize=12)
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     @staticmethod
     def plot_triview_slices(template_data, lung_mask, airway_mask, output_path):
         """绘制三视图切片展示 (轴位/冠状/矢状)"""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-
+        # 使用 GridSpec 精确控制列宽比例，消除切片形状差异导致的高度不一致
+        # aspect='auto' 强制每列图像填满等高子图格，实现三列视觉高度完全对齐
         shape = template_data.shape
         slices = {
-            'Axial': (2, shape[2] // 2),
-            'Coronal': (1, shape[1] // 2),
-            'Sagittal': (0, shape[0] // 2),
+            '轴位':   (2, shape[2] // 2),
+            '冠状位': (1, shape[1] // 2),
+            '矢状位': (0, shape[0] // 2),
         }
 
-        for col, (view_name, (axis, idx)) in enumerate(slices.items()):
-            # 提取切片并转置
-            ct_slice = np.take(template_data, idx, axis=axis).T
+        # 预计算各视图切片，获取实际像素宽高比，用于设定列宽比例
+        slice_arrays = {}
+        for view_name, (axis, idx) in slices.items():
+            s = np.take(template_data, idx, axis=axis).T
+            if '轴位' in view_name:
+                s = np.rot90(s, k=1)
+            slice_arrays[view_name] = s
 
-            # 如果是轴位 (Axial)，在 origin='lower' 下使用 k=1 实现视觉上的顺时针旋转 90 度
-            if view_name == 'Axial':
-                ct_slice = np.rot90(ct_slice, k=1)
+        # 按各切片的像素列数（宽度）设定 GridSpec 列宽比，使得三列等高
+        view_names = list(slices.keys())
+        col_widths = [slice_arrays[v].shape[1] for v in view_names]  # 宽度（像素列数）
+
+        fig = plt.figure(figsize=(20, 12), dpi=300)
+        import matplotlib.gridspec as gridspec
+        gs = gridspec.GridSpec(
+            2, 3,
+            width_ratios=col_widths,
+            wspace=0.08,
+            hspace=0.18,
+            left=0.02, right=0.98, top=0.90, bottom=0.02
+        )
+
+        for col, view_name in enumerate(view_names):
+            axis_num, idx = slices[view_name]   # axis_num: 轴编号(0/1/2), idx: 切片索引
+            ct_slice = slice_arrays[view_name]
 
             # 第一行: 模板 CT
-            axes[0, col].imshow(ct_slice, cmap='gray', vmin=-1100, vmax=200, origin='lower')
-            axes[0, col].set_title(f'{view_name} - Template CT', fontsize=12, fontweight='bold')
-            axes[0, col].axis('off')
+            ax_top = fig.add_subplot(gs[0, col])
+            # aspect='auto'：强制图像填满子图区域，消除因切片形状差异导致的列间高度不一致
+            ax_top.imshow(ct_slice, cmap='gray', vmin=-1100, vmax=200,
+                          origin='lower', aspect='auto')
+            ax_top.set_title(f'{view_name} - 健康模板', fontsize=22, fontweight='bold')
+            ax_top.axis('off')
 
             # 第二行: 结构叠加 (肺 mask + 气道 mask)
-            axes[1, col].imshow(ct_slice, cmap='gray', vmin=-1100, vmax=200, origin='lower')
+            ax_bot = fig.add_subplot(gs[1, col])
+            ax_bot.imshow(ct_slice, cmap='gray', vmin=-1100, vmax=200,
+                          origin='lower', aspect='auto')
             if lung_mask is not None:
-                lm = np.take(lung_mask, idx, axis=axis).T
-                if view_name == 'Axial':
+                lm = np.take(lung_mask, idx, axis=axis_num).T
+                if '轴位' in view_name:
                     lm = np.rot90(lm, k=1)
-                axes[1, col].contour(lm, levels=[0.5], colors='#2ecc71', linewidths=1.5)
+                ax_bot.contour(lm, levels=[0.5], colors='#2ecc71', linewidths=2.0)
             if airway_mask is not None:
-                am = np.take(airway_mask, idx, axis=axis).T
-                if view_name == 'Axial':
+                am = np.take(airway_mask, idx, axis=axis_num).T
+                if '轴位' in view_name:
                     am = np.rot90(am, k=1)
                 overlay = np.ma.masked_where(am < 0.5, am)
-                axes[1, col].imshow(overlay, cmap='autumn', alpha=0.6, origin='lower')
-            axes[1, col].set_title(f'{view_name} - Lung + Airway Overlay', fontsize=12)
-            axes[1, col].axis('off')
+                ax_bot.imshow(overlay, cmap='autumn', alpha=0.6,
+                              origin='lower', aspect='auto')
+            ax_bot.set_title(f'{view_name} - 肺与气道叠加', fontsize=21)
+            ax_bot.axis('off')
 
-        plt.suptitle('Atlas Quality - Tri-View Inspection', fontsize=16, fontweight='bold', y=1.02)
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        fig.suptitle('标准肺数字孪生底座三视图', fontsize=26, fontweight='bold', y=0.97)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     @staticmethod
     def plot_hu_histogram(template_data, lung_mask, airway_mask, output_path,
@@ -497,16 +520,22 @@ class AtlasVisualizer:
 
         # 1. 模板肺实质 HU 分布
         axes[0].hist(tmpl_hu, bins=200, range=(-1100, 100), color='#3498db',
-                     alpha=0.7, density=True, label='Template')
+                     alpha=0.7, density=True, label='健康模板 (Template)')
         if subject_data is not None:
             subj_hu = subject_data[m]
             axes[0].hist(subj_hu, bins=200, range=(-1100, 100), color='#e74c3c',
-                         alpha=0.5, density=True, label='Subject (warped)')
-        axes[0].set_xlabel('HU Value', fontsize=11)
-        axes[0].set_ylabel('Density', fontsize=11)
-        axes[0].set_title('Lung Parenchyma HU Distribution', fontsize=12, fontweight='bold')
-        axes[0].legend()
-        axes[0].axvline(x=-950, color='red', linestyle='--', alpha=0.5, label='Emphysema (-950)')
+                         alpha=0.5, density=True, label='配准受试者 (Warped Subject)')
+        axes[0].set_xlabel('HU 值 (HU Value)', fontsize=14)
+        axes[0].set_ylabel('密度 (Density)', fontsize=14)
+        axes[0].set_title('肺实质 HU 分布 (Parenchyma HU)', fontsize=16, fontweight='bold')
+
+        # Increase Y upper limit to make room for legend on the right
+        y_max = axes[0].get_ylim()[1]
+        axes[0].set_ylim(0, y_max * 1.3)
+
+        axes[0].legend(fontsize=12, loc='upper right')
+        axes[0].axvline(x=-950, color='red', linestyle='--', alpha=0.5, label='肺气肿阈值 (-950)')
+        axes[0].tick_params(axis='both', which='major', labelsize=12)
 
         # 2. 气道区域 HU 分布
         aw = airway_mask > 0
@@ -514,11 +543,16 @@ class AtlasVisualizer:
             aw_hu = template_data[aw]
             axes[1].hist(aw_hu, bins=100, range=(-1100, 200), color='#e67e22',
                          alpha=0.7, density=True)
-            axes[1].axvline(x=-400, color='red', linestyle='--', alpha=0.7, label='Wall (-400)')
-            axes[1].axvline(x=-995, color='blue', linestyle='--', alpha=0.7, label='Lumen (-995)')
-        axes[1].set_xlabel('HU Value', fontsize=11)
-        axes[1].set_title('Airway Region HU Distribution', fontsize=12, fontweight='bold')
-        axes[1].legend()
+            axes[1].axvline(x=-400, color='red', linestyle='--', alpha=0.7, label='气道壁阈值 (-400)')
+            axes[1].axvline(x=-995, color='blue', linestyle='--', alpha=0.7, label='气腔阈值 (-995)')
+        axes[1].set_xlabel('HU 值 (HU Value)', fontsize=14)
+        axes[1].set_title('气道区域 HU 分布 (Airway HU)', fontsize=16, fontweight='bold')
+
+        y_max1 = axes[1].get_ylim()[1]
+        axes[1].set_ylim(0, y_max1 * 1.3)
+
+        axes[1].legend(fontsize=12, loc='upper right')
+        axes[1].tick_params(axis='both', which='major', labelsize=12)
 
         # 3. 壁-腔-肺三组织 Box Plot
         lung_only = m & (~aw)
@@ -527,7 +561,7 @@ class AtlasVisualizer:
         parenchyma_hu = template_data[lung_only]
         bp_data = []
         bp_labels = []
-        for d, lbl in [(wall_hu, 'Wall'), (lumen_hu, 'Lumen'), (parenchyma_hu, 'Parenchyma')]:
+        for d, lbl in [(wall_hu, '气道壁 (Wall)'), (lumen_hu, '气腔 (Lumen)'), (parenchyma_hu, '肺实质 (Parenchyma)')]:
             if len(d) > 0:
                 bp_data.append(d[::max(1, len(d)//5000)])  # 子采样
                 bp_labels.append(lbl)
@@ -537,13 +571,18 @@ class AtlasVisualizer:
             for patch, c in zip(bp['boxes'], colors[:len(bp_data)]):
                 patch.set_facecolor(c)
                 patch.set_alpha(0.6)
-        axes[2].set_ylabel('HU Value', fontsize=11)
-        axes[2].set_title('Tissue HU Comparison', fontsize=12, fontweight='bold')
+        axes[2].set_ylabel('HU 值 (HU Value)', fontsize=14)
+        axes[2].set_title('组织 HU 对比 (Tissue HU Comparison)', fontsize=16, fontweight='bold')
 
-        plt.suptitle('HU Distribution Analysis', fontsize=14, fontweight='bold')
+        y_max2 = axes[2].get_ylim()[1]
+        axes[2].set_ylim(0, y_max2 * 1.3)
+
+        axes[2].tick_params(axis='both', which='major', labelsize=12)
+
+        plt.suptitle('HU 分布分析 (HU Distribution Analysis)', fontsize=18, fontweight='bold')
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     @staticmethod
     def plot_dice_bar(all_dice_results, output_path):
@@ -561,27 +600,28 @@ class AtlasVisualizer:
             means.append(np.mean(vals))
             stds.append(np.std(vals))
 
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(12, 8), dpi=300)
         x = np.arange(len(lobe_names))
         colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6']
-        bars = ax.bar(x, means, yerr=stds, capsize=5, color=colors, alpha=0.8, edgecolor='black')
+        bars = ax.bar(x, means, yerr=stds, capsize=5, color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
 
-        ax.set_xlabel('Lung Lobe', fontsize=12)
-        ax.set_ylabel('Dice Score', fontsize=12)
-        ax.set_title(f'A1. Lobe-wise Dice Similarity (n={n_subj} subjects)', fontsize=14, fontweight='bold')
+        ax.set_xlabel('肺叶 (Lung Lobe)', fontsize=16)
+        ax.set_ylabel('Dice 相似度 (Dice Score)', fontsize=16)
+        ax.set_title(f'A1. 肺叶配准 Dice 相似度 (Lobe-wise Dice Similarity, n={n_subj})', fontsize=20, fontweight='bold')
         ax.set_xticks(x)
-        ax.set_xticklabels(lobe_names, fontsize=11)
-        ax.set_ylim(0, 1.05)
-        ax.axhline(y=0.85, color='red', linestyle='--', alpha=0.5, label='Threshold (0.85)')
-        ax.legend()
+        ax.set_xticklabels(lobe_names, fontsize=14)
+        ax.set_ylim(0, 1.25)
+        ax.axhline(y=0.85, color='red', linestyle='--', linewidth=2, alpha=0.5, label='阈值 (Threshold 0.85)')
+        ax.legend(fontsize=14, loc='upper right')
+        ax.tick_params(axis='both', which='major', labelsize=14)
 
         for bar, m in zip(bars, means):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                    f'{m:.3f}', ha='center', fontsize=10, fontweight='bold')
+                    f'{m:.3f}', ha='center', fontsize=14, fontweight='bold')
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     @staticmethod
     def plot_volume_comparison(template_morpho, subjects_morpho, output_path):
@@ -594,13 +634,13 @@ class AtlasVisualizer:
             output_path     : Path, 输出 PNG 路径
         """
         structures = [
-            ('left_lung',  '左肺 Left Lung',  '#3498db'),
-            ('right_lung', '右肺 Right Lung', '#e74c3c'),
-            ('airway',     '气道 Airway',     '#2ecc71'),
+            ('left_lung',  '左肺 (Left Lung)',  '#3498db'),
+            ('right_lung', '右肺 (Right Lung)', '#e74c3c'),
+            ('airway',     '气道 (Airway)',     '#2ecc71'),
         ]
-        fig, axes = plt.subplots(1, 3, figsize=(15, 6))
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=300)
         fig.suptitle('D1. 解剖结构体积对比 (配准后空间)\nAnatomical Volume Comparison (Registered Space)',
-                     fontsize=14, fontweight='bold', y=1.02)
+                     fontsize=18, fontweight='bold', y=1.02)
 
         for ax, (key, label, color) in zip(axes, structures):
             vol_key = f'{key}_volume_cc'
@@ -610,35 +650,40 @@ class AtlasVisualizer:
             if subj_vals:
                 mean_v, std_v = float(np.mean(subj_vals)), float(np.std(subj_vals))
                 x_pos = 1.0
-                # 误差带（±1 SD）
-                ax.bar(x_pos, mean_v, width=0.5, color=color, alpha=0.55,
-                       edgecolor='black', linewidth=1.2, label=f'均值 ± SD\n{mean_v:.0f}±{std_v:.0f} cc')
+                # 误差带（±1 SD） - 减小柱子宽度以防图例重叠
+                ax.bar(x_pos, mean_v, width=0.35, color=color, alpha=0.55,
+                       edgecolor='black', linewidth=1.5, label=f'群体均值 ± SD\n{mean_v:.0f}±{std_v:.0f} cc')
                 ax.errorbar(x_pos, mean_v, yerr=std_v, fmt='none',
                             ecolor='black', elinewidth=2, capsize=8)
                 # 个体散点
-                jitter = np.random.uniform(-0.08, 0.08, len(subj_vals))
+                jitter = np.random.uniform(-0.06, 0.06, len(subj_vals))
                 ax.scatter(np.full(len(subj_vals), x_pos) + jitter, subj_vals,
-                           color='black', s=40, zorder=5, alpha=0.8, label='个体值')
+                           color='black', s=40, zorder=5, alpha=0.8, label='受试者个体值')
+
+                # 适当提高 Y 轴上限，为图例留出空间
+                max_val = max(max(subj_vals), mean_v + std_v, tmpl_val)
+                ax.set_ylim(0, max_val * 1.5)
             else:
                 mean_v, std_v = 0, 0
-                ax.text(1.0, 0.5, '无受试者数据', ha='center', va='center',
-                        transform=ax.transAxes, fontsize=11, color='gray')
+                ax.text(0.5, 0.5, '无受试者数据 (No Subject Data)', ha='center', va='center',
+                        transform=ax.transAxes, fontsize=14, color='gray')
 
             # 模板水平线
             ax.axhline(tmpl_val, color='red', linewidth=2, linestyle='--',
-                       label=f'模板 {tmpl_val:.0f} cc')
+                       label=f'健康模板实测值\n{tmpl_val:.0f} cc')
 
-            ax.set_title(label, fontsize=12, fontweight='bold')
-            ax.set_ylabel('体积 (cc)', fontsize=11)
+            ax.set_title(label, fontsize=16, fontweight='bold')
+            ax.set_ylabel('体积 (Volume, cc)', fontsize=14)
             ax.set_xlim(0.5, 1.5)
             ax.set_xticks([])
-            ax.legend(fontsize=9, loc='upper right')
+            ax.legend(fontsize=12, loc='upper right')
             ax.yaxis.grid(True, alpha=0.4)
             ax.set_axisbelow(True)
+            ax.tick_params(axis='y', labelsize=12)
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     @staticmethod
     def plot_sphericity_comparison(template_morpho, subjects_morpho, output_path):
@@ -650,14 +695,14 @@ class AtlasVisualizer:
         球=1.0, 肺≈0.3-0.6, 气道树≈0.05-0.15 (管状)
         """
         structures = [
-            ('left_lung',  '左肺 Left Lung',  '#3498db'),
-            ('right_lung', '右肺 Right Lung', '#e74c3c'),
-            ('airway',     '气道 Airway',     '#2ecc71'),
+            ('left_lung',  '左肺 (Left Lung)',  '#3498db'),
+            ('right_lung', '右肺 (Right Lung)', '#e74c3c'),
+            ('airway',     '气道 (Airway)',     '#2ecc71'),
         ]
-        fig, axes = plt.subplots(1, 3, figsize=(15, 6))
-        fig.suptitle('D3. 球形度对比 Sphericity Comparison\n'
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=300)
+        fig.suptitle('D3. 球形度对比 (Sphericity Comparison)\n'
                      r'$\Psi = \pi^{1/3}(6V)^{2/3}/A$ (球=1.0, 管状≈0)',
-                     fontsize=13, fontweight='bold', y=1.02)
+                     fontsize=18, fontweight='bold', y=1.02)
 
         for ax, (key, label, color) in zip(axes, structures):
             sp_key = f'{key}_sphericity'
@@ -668,38 +713,39 @@ class AtlasVisualizer:
             if subj_vals:
                 mean_v = float(np.mean(subj_vals))
                 std_v  = float(np.std(subj_vals))
-                # 群体均值条形 + 误差棒
-                ax.bar(x_pos, mean_v, width=0.5, color=color, alpha=0.55,
-                       edgecolor='black', linewidth=1.2,
-                       label=f'均值 ± SD\n{mean_v:.3f}±{std_v:.3f}')
+                # 群体均值条形 + 误差棒 - 减小宽度防止重叠
+                ax.bar(x_pos, mean_v, width=0.35, color=color, alpha=0.55,
+                       edgecolor='black', linewidth=1.5,
+                       label=f'群体均值 ± SD\n{mean_v:.3f}±{std_v:.3f}')
                 ax.errorbar(x_pos, mean_v, yerr=std_v, fmt='none',
                             ecolor='black', elinewidth=2, capsize=8)
                 # 个体散点
-                jitter = np.random.uniform(-0.08, 0.08, len(subj_vals))
+                jitter = np.random.uniform(-0.06, 0.06, len(subj_vals))
                 ax.scatter(np.full(len(subj_vals), x_pos) + jitter, subj_vals,
-                           color='black', s=40, zorder=5, alpha=0.8, label='个体值')
-                y_max = max(max(subj_vals), tmpl_val) * 1.35
+                           color='black', s=40, zorder=5, alpha=0.8, label='受试者个体值')
+                y_max = max(max(subj_vals), mean_v + std_v, tmpl_val) * 1.55
             else:
-                ax.text(0.5, 0.5, '无受试者数据', ha='center', va='center',
-                        transform=ax.transAxes, fontsize=11, color='gray')
+                ax.text(0.5, 0.5, '无受试者数据 (No Subject Data)', ha='center', va='center',
+                        transform=ax.transAxes, fontsize=14, color='gray')
                 y_max = max(tmpl_val * 1.5, 0.5)
 
             # 模板值：红色虚线（与 plot_volume_comparison 保持一致）
             ax.axhline(tmpl_val, color='red', linewidth=2, linestyle='--',
-                       label=f'模板实测值 {tmpl_val:.3f}')
+                       label=f'健康模板实测值\n{tmpl_val:.3f}')
 
-            ax.set_title(label, fontsize=12, fontweight='bold')
-            ax.set_ylabel('球形度 Sphericity (Ψ)', fontsize=11)
+            ax.set_title(label, fontsize=16, fontweight='bold')
+            ax.set_ylabel('球形度 (Sphericity, Ψ)', fontsize=14)
             ax.set_xlim(0.5, 1.5)
             ax.set_xticks([])
             ax.set_ylim(0, y_max)
-            ax.legend(fontsize=9, loc='upper right')
+            ax.legend(fontsize=12, loc='upper right')
             ax.yaxis.grid(True, alpha=0.4)
             ax.set_axisbelow(True)
+            ax.tick_params(axis='y', labelsize=12)
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
 
 def _build_report_text(metrics, timestamp, fv, pct, frangi_note, jac_note,
