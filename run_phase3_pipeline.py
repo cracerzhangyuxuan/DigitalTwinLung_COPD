@@ -78,10 +78,65 @@ Phase 3 端到端流水线（病理映射与 AI 融合）
     python run_phase3_pipeline.py --visualize --model-type patchgan --limit 3
 
 
+    # ============================================================
+    # 验证集评估命令（使用 --start-patient-id 跳过训练集）
+    # 训练集: copd_001~023 | 验证集: copd_024~029
+    # ============================================================
+
+    # 示例：在验证集 copd_024~026 上评估 PatchGAN
+    python run_phase3_pipeline.py --inference  --model-type patchgan --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --evaluate   --model-type patchgan --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --visualize  --model-type patchgan --start-patient-id copd_024 --limit 3
+
+
+    # ============================================================
+    # ★ 新模型完整工作流命令 ★
+    # AttGAN / MAE-PatchGAN (两阶段) / DDPM
+    # ============================================================
+
+    # ---- [1] AttGAN: 注意力增强 GAN (AttentionUNet + PatchDiscriminator) ----
+    # 使用 GPU:1 训练/推理（两种方式二选一）:
+    #   A. 直接指定设备: --device cuda:1
+    #   B. 或先设置环境变量: set CUDA_VISIBLE_DEVICES=1  然后使用 --device cuda
+    # 训练 (推荐 150 epochs，约 2~3 小时)
+    python run_phase3_pipeline.py --phase3b --model-type attgan --epochs 150 --device cuda:1
+    # 推理 + 评估 + 可视化 (验证集 copd_024~026)
+    python run_phase3_pipeline.py --inference  --model-type attgan --device cuda:1 --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --evaluate   --model-type attgan --device cuda:1 --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --visualize  --model-type attgan --device cuda:1 --start-patient-id copd_024 --limit 3
+
+    # ---- [2] MAE-PatchGAN: 自监督预训练 + PatchGAN 微调 (两阶段) ----
+    # 阶段 1: MAE 自监督预训练 (推荐 100 epochs，约 1~2 小时)
+    #   → 输出: checkpoints/mae_pretrain/encoder_weights.pth
+    python run_phase3_pipeline.py --mae-pretrain --epochs 100 --device cuda:1
+    # 阶段 2: PatchGAN 微调 (加载预训练 encoder，推荐 80 epochs)
+    #   → 自动从 checkpoints/mae_pretrain/encoder_weights.pth 加载
+    python run_phase3_pipeline.py --phase3b --model-type mae_patchgan --epochs 80 --device cuda:1
+    # 推理 + 评估 + 可视化 (验证集 copd_024~026)
+    python run_phase3_pipeline.py --inference  --model-type mae_patchgan --device cuda:1 --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --evaluate   --model-type mae_patchgan --device cuda:1 --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --visualize  --model-type mae_patchgan --device cuda:1 --start-patient-id copd_024 --limit 3
+
+    # ---- [3] DDPM: 去噪扩散概率模型 (DiffusionUNet) ----
+    # 训练 (推荐 200 epochs，约 4~6 小时; 使用 EMA + 梯度裁剪)
+    python run_phase3_pipeline.py --phase3b --model-type ddpm --epochs 200 --device cuda:1
+    # 推理 + 评估 + 可视化 (验证集 copd_024~026)
+    python run_phase3_pipeline.py --inference  --model-type ddpm --device cuda:1 --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --evaluate   --model-type ddpm --device cuda:1 --start-patient-id copd_024 --limit 3
+    python run_phase3_pipeline.py --visualize  --model-type ddpm --device cuda:1 --start-patient-id copd_024 --limit 3
+
+
+
+
+    # ---- [4] 验证集 L1-L4 跨模型评估 (训练完成后) ----
+    python scripts/evaluate_validation_l1_l4.py
+    python scripts/generate_validation_charts.py
+
 
 作者：DigitalTwinLung COPD Project
 日期：2025-12-30
 更新：2026-01-07 (添加 Phase 3B 支持)
+更新：2026-02-XX (添加 AttGAN/MAE-PatchGAN/DDPM 新模型、MAE 预训练入口、数据集硬编码划分)
 """
 
 import sys
@@ -605,6 +660,143 @@ def run_visualization(
 # Phase 3B: AI 纹理融合
 # =============================================================================
 
+
+def run_mae_pretrain(
+    config: dict,
+    logger: logging.Logger,
+    epochs: int = None,
+) -> Tuple[bool, Dict]:
+    """
+    执行 MAE 自监督预训练（MAE-PatchGAN 的第一阶段）
+
+    使用 InpaintingUNet 在无标签 CT patches 上进行自监督预训练，
+    训练完成后导出 encoder 权重到 checkpoints/mae_pretrain/encoder_weights.pth。
+
+    Args:
+        config: 配置字典
+        logger: 日志记录器
+        epochs: 预训练轮数（覆盖配置文件，默认 100）
+
+    Returns:
+        Tuple[bool, Dict]: (是否成功, 结果信息)
+    """
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("  MAE 自监督预训练 (MAE-PatchGAN 第一阶段)")
+    logger.info("=" * 60)
+
+    paths = config.get('paths', {})
+    mapped_dir = Path(paths.get('mapped', 'data/03_mapped'))
+
+    # MAE 预训练的检查点目录（固定路径，不随 model_type 变化）
+    checkpoint_dir = Path('checkpoints') / 'mae_pretrain'
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # 覆盖 epochs
+    train_config = config.get('training', {})
+    mae_config = train_config.get('mae', {})
+    if epochs:
+        mae_config['pretrain_epochs'] = epochs
+    else:
+        mae_config.setdefault('pretrain_epochs', 100)
+    train_config['mae'] = mae_config
+    config['training'] = train_config
+
+    pretrain_epochs = mae_config['pretrain_epochs']
+    logger.info(f"  预训练轮数: {pretrain_epochs}")
+    logger.info(f"  检查点目录: {checkpoint_dir}")
+
+    try:
+        # 构建数据集（使用与训练相同的数据划分逻辑）
+        ct_files, mask_files = [], []
+        for patient_dir in sorted(mapped_dir.iterdir()):
+            if not patient_dir.is_dir() or patient_dir.name == 'visualizations':
+                continue
+            warped_ct = patient_dir / f"{patient_dir.name}_warped.nii.gz"
+            warped_mask = patient_dir / f"{patient_dir.name}_warped_lesion.nii.gz"
+            if warped_ct.exists() and warped_mask.exists():
+                ct_files.append(warped_ct)
+                mask_files.append(warped_mask)
+
+        if not ct_files:
+            logger.error("  ✗ 未找到已配准数据，请先运行 Phase 3A")
+            return False, {}
+
+        # 硬编码数据集划分（与 train.py 一致）
+        TRAIN_CUTOFF = "copd_024"
+        train_ct = [f for f in ct_files if f.parent.name < TRAIN_CUTOFF]
+        train_mask = [f for f in mask_files if f.parent.name < TRAIN_CUTOFF]
+        val_ct = [f for f in ct_files if f.parent.name >= TRAIN_CUTOFF]
+        val_mask = [f for f in mask_files if f.parent.name >= TRAIN_CUTOFF]
+
+        if not val_ct:
+            val_ct, val_mask = train_ct[-1:], train_mask[-1:]
+
+        logger.info(f"  训练集: {len(train_ct)} 例, 验证集: {len(val_ct)} 例")
+
+        # 创建 DataLoader
+        dataset_mod = importlib.import_module("src.04_texture_synthesis.dataset")
+        LungPatchDataset = dataset_mod.LungPatchDataset
+        from torch.utils.data import DataLoader
+
+        patch_size = tuple(train_config.get('patch_size', [64, 64, 64]))
+        batch_size = train_config.get('batch_size', 4)
+        num_workers = train_config.get('num_workers', 0)
+
+        train_dataset = LungPatchDataset(
+            ct_paths=train_ct, mask_paths=train_mask,
+            patch_size=patch_size, augment=True
+        )
+        val_dataset = LungPatchDataset(
+            ct_paths=val_ct, mask_paths=val_mask,
+            patch_size=patch_size, augment=False
+        )
+
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size,
+            shuffle=True, num_workers=num_workers
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size,
+            shuffle=False, num_workers=num_workers
+        )
+
+        # 创建模型和预训练器
+        net_mod = importlib.import_module("src.04_texture_synthesis.network")
+        mae_mod = importlib.import_module("src.04_texture_synthesis.mae_pretrain")
+
+        model = net_mod.create_model('unet')  # MAE 预训练使用 InpaintingUNet
+        pretrainer = mae_mod.MAEPretrainer(model, config)
+
+        # 执行预训练
+        pretrainer.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=pretrain_epochs,
+            checkpoint_dir=str(checkpoint_dir),
+            save_frequency=20,
+        )
+
+        encoder_path = checkpoint_dir / 'encoder_weights.pth'
+        logger.info("")
+        logger.info("  ✓ MAE 预训练完成!")
+        logger.info(f"  Encoder 权重: {encoder_path}")
+
+        return True, {
+            'checkpoint_dir': str(checkpoint_dir),
+            'encoder_weights': str(encoder_path),
+        }
+
+    except KeyboardInterrupt:
+        logger.warning("  MAE 预训练被用户中断")
+        return False, {}
+    except Exception as e:
+        logger.error(f"  ✗ MAE 预训练失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {'error': str(e)}
+
+
 def run_texture_training(
     config: dict,
     logger: logging.Logger,
@@ -687,7 +879,10 @@ def run_texture_training(
     model_names = {
         'unet': '基线方案 (3D U-Net)',
         'partial_conv': '进阶方案 (Partial Conv)',
-        'patchgan': '高级方案 (PatchGAN)'
+        'patchgan': '高级方案 (PatchGAN)',
+        'attgan': '注意力增强方案 (AttGAN)',
+        'mae_patchgan': '自监督预训练方案 (MAE-PatchGAN)',
+        'ddpm': '扩散模型方案 (DDPM)'
     }
     logger.info(f"  模型类型: {model_names.get(model_type, model_type)}")
     logger.info(f"  训练轮数: {train_config.get('epochs', 100)}")
@@ -727,7 +922,8 @@ def run_texture_inference(
     device: str = 'cuda',
     smooth_boundary: bool = True,
     model_type: str = 'partial_conv',
-    limit: int = None
+    limit: int = None,
+    start_patient_id: str = None
 ) -> Tuple[bool, Dict]:
     """
     执行 Phase 3B AI 纹理融合推理
@@ -741,6 +937,7 @@ def run_texture_inference(
         smooth_boundary: 是否平滑边界
         model_type: 模型类型（用于查找对应的检查点目录）
         limit: 限制处理的患者数量（默认处理所有）
+        start_patient_id: 起始患者 ID（如 copd_024，从该患者开始处理）
 
     Returns:
         Tuple[bool, Dict]: (是否成功, 推理结果)
@@ -819,6 +1016,11 @@ def run_texture_inference(
         patient_dirs = [d for d in sorted(mapped_dir.iterdir())
                        if d.is_dir() and d.name != 'visualizations']
 
+    # 应用 start_patient_id 过滤（从指定患者开始）
+    if start_patient_id:
+        patient_dirs = [d for d in patient_dirs if d.name >= start_patient_id]
+        logger.info(f"  从 {start_patient_id} 开始处理")
+
     # 应用 limit 参数
     if limit and limit > 0:
         patient_dirs = patient_dirs[:limit]
@@ -849,7 +1051,8 @@ def run_texture_inference(
                 model=model,
                 output_path=output_path,
                 device=device,
-                smooth_boundary_width=3 if smooth_boundary else 0
+                smooth_boundary_width=3 if smooth_boundary else 0,
+                model_type=model_type
             )
             logger.info(f"    ✓ 完成: {output_path.name}")
             success_count += 1
@@ -968,7 +1171,7 @@ def _generate_patient_report(
 
 ![纹理质量雷达图]({patient_id}_texture_radar.png)
 """)
- 
+
 
 def _generate_texture_radar_chart(
     output_dir: Path,
@@ -1159,7 +1362,8 @@ def run_model_evaluation(
     config: dict,
     logger: logging.Logger,
     model_type: str = 'partial_conv',
-    num_patients: int = 10
+    num_patients: int = 10,
+    start_patient_id: str = None
 ) -> bool:
     """
     执行模型评估（与真实 COPD CT 对比）
@@ -1169,6 +1373,7 @@ def run_model_evaluation(
         logger: 日志记录器
         model_type: 模型类型
         num_patients: 评估的患者数量
+        start_patient_id: 起始患者 ID（如 copd_024，仅评估从该患者开始的数据）
 
     Returns:
         bool: 是否成功
@@ -1214,7 +1419,15 @@ def run_model_evaluation(
         logger.error(f"  请先运行推理: --inference --model-type {model_type}")
         return False
 
-    fused_files = sorted(fused_dir.glob("*_fused.nii.gz"))[:num_patients]
+    fused_files = sorted(fused_dir.glob("*_fused.nii.gz"))
+
+    # 应用 start_patient_id 过滤
+    if start_patient_id:
+        fused_files = [f for f in fused_files
+                       if f.name.replace('_fused.nii.gz', '') >= start_patient_id]
+        logger.info(f"  从 {start_patient_id} 开始评估")
+
+    fused_files = fused_files[:num_patients]
     if not fused_files:
         logger.error(f"  ✗ 未找到融合结果文件")
         return False
@@ -2014,7 +2227,8 @@ def run_result_visualization(
     config: dict,
     logger: logging.Logger,
     model_type: str = 'partial_conv',
-    num_patients: int = 5
+    num_patients: int = 5,
+    start_patient_id: str = None
 ) -> bool:
     """
     生成可视化结果（三图输出策略）
@@ -2029,6 +2243,7 @@ def run_result_visualization(
         logger: 日志记录器
         model_type: 模型类型
         num_patients: 可视化的患者数量
+        start_patient_id: 起始患者 ID（如 copd_024，仅可视化从该患者开始的数据）
 
     Returns:
         bool: 是否成功
@@ -2067,7 +2282,15 @@ def run_result_visualization(
         logger.error(f"  ✗ 模板不存在: {template_path}")
         return False
 
-    fused_files = sorted(fused_dir.glob("*_fused.nii.gz"))[:num_patients]
+    fused_files = sorted(fused_dir.glob("*_fused.nii.gz"))
+
+    # 应用 start_patient_id 过滤
+    if start_patient_id:
+        fused_files = [f for f in fused_files
+                       if f.name.replace('_fused.nii.gz', '') >= start_patient_id]
+        logger.info(f"  从 {start_patient_id} 开始可视化")
+
+    fused_files = fused_files[:num_patients]
     if not fused_files:
         logger.error(f"  ✗ 未找到融合结果文件")
         return False
@@ -2270,6 +2493,10 @@ def main():
         help='仅执行可视化（需要已有映射结果）'
     )
     step_group.add_argument(
+        '--mae-pretrain', action='store_true',
+        help='执行 MAE 自监督预训练（MAE-PatchGAN 的第一阶段，输出 encoder 权重到 checkpoints/mae_pretrain/）'
+    )
+    step_group.add_argument(
         '--phase3b', '--train', action='store_true',
         help='执行 Phase 3B 训练'
     )
@@ -2293,8 +2520,8 @@ def main():
     # Phase 3B 参数
     parser.add_argument(
         '--model-type', type=str, default='partial_conv',
-        choices=['unet', 'partial_conv', 'patchgan'],
-        help='模型类型: unet(基线), partial_conv(进阶), patchgan(高级)'
+        choices=['unet', 'partial_conv', 'patchgan', 'attgan', 'mae_patchgan', 'ddpm'],
+        help='模型类型: unet(基线), partial_conv(进阶), patchgan(高级), attgan(注意力增强), mae_patchgan(MAE预训练), ddpm(扩散模型)'
     )
     parser.add_argument(
         '--epochs', type=int, default=None,
@@ -2329,6 +2556,12 @@ def main():
     parser.add_argument(
         '--limit', type=int, default=None,
         help='限制处理数量'
+    )
+    parser.add_argument(
+        '--start-patient-id', type=str, default=None,
+        help='起始患者 ID（如 copd_024），从该患者开始处理/评估/可视化。'
+             '用于在验证集（未参与训练的患者）上评估模型泛化能力。'
+             '示例: --start-patient-id copd_024 --limit 3'
     )
     parser.add_argument(
         '--output-dir', type=str, default=None,
@@ -2412,6 +2645,30 @@ def main():
         sys.exit(0)
 
     # =========================================================================
+    # --mae-pretrain 模式 (MAE 自监督预训练)
+    # =========================================================================
+    if args.mae_pretrain:
+        logger.info("")
+        logger.info("模式: MAE 自监督预训练 (--mae-pretrain)")
+
+        pretrain_ok, pretrain_results = run_mae_pretrain(
+            config, logger,
+            epochs=args.epochs,
+        )
+
+        elapsed = time.time() - pipeline_start
+        logger.info("")
+        logger.info("=" * 60)
+        if pretrain_ok:
+            logger.info(f"MAE 预训练完成，耗时: {elapsed/60:.1f} 分钟")
+            logger.info(f"Encoder 权重: {pretrain_results.get('encoder_weights', '')}")
+            logger.info("下一步: python run_phase3_pipeline.py --phase3b --model-type mae_patchgan --epochs 50")
+        else:
+            logger.error("MAE 预训练失败")
+        logger.info("=" * 60)
+        sys.exit(0 if pretrain_ok else 1)
+
+    # =========================================================================
     # --phase3b 模式 (仅训练)
     # =========================================================================
     if args.phase3b:
@@ -2450,7 +2707,8 @@ def main():
             patient_id=args.patient,
             device=args.device,
             model_type=args.model_type,
-            limit=args.limit  # 传递 limit 参数
+            limit=args.limit,  # 传递 limit 参数
+            start_patient_id=args.start_patient_id
         )
 
         elapsed = time.time() - pipeline_start
@@ -2474,7 +2732,8 @@ def main():
         eval_ok = run_model_evaluation(
             config, logger,
             model_type=args.model_type,
-            num_patients=args.limit or 10
+            num_patients=args.limit or 10,
+            start_patient_id=args.start_patient_id
         )
 
         elapsed = time.time() - pipeline_start
@@ -2499,7 +2758,8 @@ def main():
         viz_ok = run_result_visualization(
             config, logger,
             model_type=args.model_type,
-            num_patients=args.limit or 5
+            num_patients=args.limit or 5,
+            start_patient_id=args.start_patient_id
         )
 
         elapsed = time.time() - pipeline_start

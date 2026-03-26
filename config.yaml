@@ -181,6 +181,9 @@ training:
   # - "unet": 基线方案 - 3D U-Net Inpainting（推荐首选）
   # - "partial_conv": 进阶方案 - 3D Partial Convolution（处理不规则 Mask 更优）
   # - "patchgan": 高级方案 - U-Net + PatchGAN（效果最佳，训练复杂）
+  # - "attgan": 注意力增强方案 - Attention U-Net + PatchGAN（注意力门控 + 自注意力）
+  # - "mae_patchgan": 自监督预训练方案 - MAE 预训练 + PatchGAN（需额外预训练步骤）
+  # - "ddpm": 扩散模型方案 - Diffusion U-Net（去噪扩散，无对抗训练，需专用训练循环）
   model_type: "unet"
 
   # 数据加载

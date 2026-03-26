@@ -30,8 +30,10 @@ try:
 except ImportError:
     HAS_TENSORBOARD = False
 
-from .network import InpaintingUNet, PatchDiscriminator, PartialConvUNet, create_model
+from .network import InpaintingUNet, PatchDiscriminator, PartialConvUNet, AttentionUNet, DiffusionUNet, create_model
 from .losses import InpaintingLoss
+from .diffusion_trainer import DiffusionTrainer
+from .mae_pretrain import MAEPretrainer
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -344,9 +346,29 @@ def main(config: dict) -> None:
 
     logger.info(f"找到 {len(ct_files)} 例已配准数据")
 
-    # 划分训练/验证集
-    train_ratio = 0.8
-    n_train = max(1, int(len(ct_files) * train_ratio))
+    # 划分训练/验证集 — 硬编码分界线，杜绝数据泄漏
+    # 训练集: copd_001 ~ copd_023 (23 例)
+    # 验证集: copd_024 ~ copd_029 (6 例)
+    TRAIN_CUTOFF = "copd_024"  # 该 ID 及之后的患者划入验证集
+    train_ct, train_mask = [], []
+    val_ct, val_mask = [], []
+    for ct_f, mk_f in zip(ct_files, mask_files):
+        patient_id = ct_f.parent.name  # e.g. "copd_001"
+        if patient_id < TRAIN_CUTOFF:
+            train_ct.append(ct_f)
+            train_mask.append(mk_f)
+        else:
+            val_ct.append(ct_f)
+            val_mask.append(mk_f)
+
+    # 安全回退：如果验证集为空（数据不足），使用训练集最后一个
+    if not val_ct:
+        val_ct = train_ct[-1:]
+        val_mask = train_mask[-1:]
+
+    logger.info(f"数据集划分 (硬编码边界={TRAIN_CUTOFF}):")
+    logger.info(f"  训练集: {len(train_ct)} 例 ({train_ct[0].parent.name}~{train_ct[-1].parent.name})")
+    logger.info(f"  验证集: {len(val_ct)} 例 ({val_ct[0].parent.name}~{val_ct[-1].parent.name})")
 
     from .dataset import LungPatchDataset
     from torch.utils.data import DataLoader
@@ -357,15 +379,15 @@ def main(config: dict) -> None:
     num_workers = train_config.get('num_workers', 0)  # Windows 下建议设为 0
 
     train_dataset = LungPatchDataset(
-        ct_paths=ct_files[:n_train],
-        mask_paths=mask_files[:n_train],
+        ct_paths=train_ct,
+        mask_paths=train_mask,
         patch_size=patch_size,
         augment=True
     )
 
     val_dataset = LungPatchDataset(
-        ct_paths=ct_files[n_train:] if n_train < len(ct_files) else ct_files[-1:],
-        mask_paths=mask_files[n_train:] if n_train < len(mask_files) else mask_files[-1:],
+        ct_paths=val_ct,
+        mask_paths=val_mask,
         patch_size=patch_size,
         augment=False
     )
@@ -386,14 +408,43 @@ def main(config: dict) -> None:
     model_type = train_config.get('model_type', 'unet')
     logger.info(f"创建模型: {model_type}")
 
-    if model_type == 'patchgan':
-        generator, discriminator = create_model('patchgan')
+    # GAN 系列模型返回 (generator, discriminator) 元组
+    if model_type in ('patchgan', 'attgan', 'mae_patchgan'):
+        generator, discriminator = create_model(model_type)
     elif model_type == 'partial_conv':
         generator = create_model('partial_conv')
         discriminator = None
+    elif model_type == 'ddpm':
+        # DDPM 使用专用的 DiffusionTrainer
+        logger.info("DDPM 使用专用 DiffusionTrainer 训练循环")
+        model = create_model('ddpm')
+        diff_trainer = DiffusionTrainer(model, config)
+        # 注意：pipeline 已将 paths['checkpoints'] 修改为 checkpoints/ddpm，
+        #       此处直接使用，不再追加子目录，避免 checkpoints/ddpm/ddpm 双重嵌套
+        checkpoint_dir = Path(paths.get('checkpoints', 'checkpoints'))
+        diff_trainer.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=train_config.get('epochs', 500),
+            checkpoint_dir=checkpoint_dir,
+            save_frequency=train_config.get('save_frequency', 50),
+        )
+        return  # DDPM 训练流程已完成，不走标准 Trainer
     else:  # 默认 unet
         generator = create_model('unet')
         discriminator = None
+
+    # MAE-PatchGAN 预训练权重加载（如果有）
+    if model_type == 'mae_patchgan':
+        # 使用项目根目录下的固定路径（不受 pipeline 修改 paths['checkpoints'] 影响）
+        mae_weights_path = Path('checkpoints') / 'mae_pretrain' / 'encoder_weights.pth'
+        if mae_weights_path.exists():
+            logger.info(f"加载 MAE 预训练 encoder 权重: {mae_weights_path}")
+            encoder_weights = torch.load(mae_weights_path, map_location='cpu')
+            missing, unexpected = generator.load_state_dict(encoder_weights, strict=False)
+            logger.info(f"  加载完成: {len(encoder_weights)} 个权重, {len(missing)} 个缺失, {len(unexpected)} 个多余")
+        else:
+            logger.warning(f"MAE 预训练权重未找到: {mae_weights_path}，使用随机初始化")
 
     # 创建训练器
     trainer = Trainer(generator, discriminator, config)

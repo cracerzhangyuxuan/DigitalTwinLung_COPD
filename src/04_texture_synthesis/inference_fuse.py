@@ -24,7 +24,7 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
-from .network import InpaintingUNet, PartialConvUNet, PatchDiscriminator, create_model
+from .network import InpaintingUNet, PartialConvUNet, PatchDiscriminator, AttentionUNet, DiffusionUNet, create_model
 from ..utils.io import load_nifti, save_nifti
 from ..utils.math_ops import normalize_ct, denormalize_ct
 from ..utils.logger import get_logger
@@ -43,7 +43,7 @@ def load_model(
     Args:
         checkpoint_path: 检查点路径
         device: 设备
-        model_type: 模型类型 ("unet", "partial_conv", "patchgan")
+        model_type: 模型类型 ("unet", "partial_conv", "patchgan", "attgan", "mae_patchgan", "ddpm")
 
     Returns:
         model: 加载的模型
@@ -54,23 +54,130 @@ def load_model(
     device = torch.device(device if torch.cuda.is_available() else "cpu")
 
     # 根据模型类型创建对应的网络
-    if model_type == "unet" or model_type == "patchgan":
-        # patchgan 的生成器也是 UNet
+    if model_type in ("unet", "patchgan", "mae_patchgan"):
+        # patchgan / mae_patchgan 的生成器也是 UNet
         model = InpaintingUNet()
     elif model_type == "partial_conv":
         model = PartialConvUNet()
+    elif model_type == "attgan":
+        model = AttentionUNet()
+    elif model_type == "ddpm":
+        model = DiffusionUNet()
     else:
         logger.warning(f"未知模型类型 '{model_type}'，使用默认 UNet")
         model = InpaintingUNet()
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint['generator_state_dict'])
+
+    # DDPM 模型优先加载 EMA 权重（采样质量更优）
+    if model_type == "ddpm" and 'ema_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['ema_state_dict'])
+        logger.info(f"  DDPM: 使用 EMA 权重 (采样质量更优)")
+    else:
+        model.load_state_dict(checkpoint['generator_state_dict'])
     model.to(device)
     model.eval()
 
     logger.info(f"模型加载完成: {checkpoint_path}")
     logger.info(f"  模型类型: {model_type}")
     return model
+
+
+# ============================================================================
+# DDPM 专用推理函数
+# ============================================================================
+
+def ddpm_inpaint_patch(
+    model: 'torch.nn.Module',
+    template_patch: 'torch.Tensor',
+    mask_patch: 'torch.Tensor',
+    device: 'torch.device',
+    num_timesteps: int = 1000,
+    ddim_steps: int = 50,
+    beta_start: float = 1e-4,
+    beta_end: float = 0.02,
+) -> 'torch.Tensor':
+    """
+    DDPM RePaint Inpainting 推理（单个 patch）
+
+    使用 DDIM 加速采样 + RePaint 策略：
+    - 从纯高斯噪声 x_T 出发，逐步去噪
+    - 每步去噪后，将已知区域（非 mask）替换为对应时间步的加噪真实数据
+    - 最终得到 mask 区域的 inpainting 结果
+
+    Args:
+        model: DiffusionUNet 模型（已加载权重，eval 模式）
+        template_patch: 归一化后的模板 patch (1, 1, D, H, W)
+        mask_patch: 病灶 mask patch (1, 1, D, H, W)，mask>0 为待修复区域
+        device: 计算设备
+        num_timesteps: 训练时使用的扩散步数 T
+        ddim_steps: DDIM 加速采样步数（默认 50）
+        beta_start: β 起始值（须与训练一致）
+        beta_end: β 终止值（须与训练一致）
+
+    Returns:
+        output_patch: 修复后的 patch (1, 1, D, H, W)
+    """
+    # 构建噪声调度器（与训练一致）
+    betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+    # DDIM 子序列：从 T 步中均匀选取 ddim_steps 个时间步
+    step_size = num_timesteps // ddim_steps
+    timesteps = list(range(0, num_timesteps, step_size))[::-1]  # 从大到小
+
+    # 将模板和 mask 移到设备
+    x_known = template_patch.to(device)
+    mask_bool = (mask_patch > 0).to(device)  # True = 待修复区域
+
+    # 从纯高斯噪声开始
+    x_t = torch.randn_like(x_known)
+
+    model.eval()
+    with torch.no_grad():
+        for i, t_val in enumerate(timesteps):
+            t_tensor = torch.full((x_t.shape[0],), t_val, device=device, dtype=torch.long)
+
+            # 预测噪声
+            noise_pred = model(x_t, t_tensor)
+
+            # DDIM 去噪一步
+            alpha_t = alphas_cumprod[t_val]
+            sqrt_alpha_t = torch.sqrt(alpha_t)
+            sqrt_one_minus_alpha_t = torch.sqrt(1.0 - alpha_t)
+
+            # 预测 x_0
+            x_0_pred = (x_t - sqrt_one_minus_alpha_t * noise_pred) / sqrt_alpha_t
+            x_0_pred = torch.clamp(x_0_pred, 0.0, 1.0)  # 限制到有效范围
+
+            # 确定下一个时间步
+            if i + 1 < len(timesteps):
+                t_next = timesteps[i + 1]
+                alpha_next = alphas_cumprod[t_next]
+            else:
+                t_next = 0
+                alpha_next = torch.tensor(1.0, device=device)
+
+            # DDIM 确定性采样（eta=0，无额外噪声）
+            sqrt_alpha_next = torch.sqrt(alpha_next)
+            sqrt_one_minus_alpha_next = torch.sqrt(1.0 - alpha_next)
+            x_t = sqrt_alpha_next * x_0_pred + sqrt_one_minus_alpha_next * noise_pred
+
+            # RePaint 策略：将已知区域替换为对应时间步的加噪真实数据
+            if t_next > 0:
+                noise_known = torch.randn_like(x_known)
+                sqrt_alpha_known = torch.sqrt(alphas_cumprod[t_next])
+                sqrt_one_minus_known = torch.sqrt(1.0 - alphas_cumprod[t_next])
+                x_known_noisy = sqrt_alpha_known * x_known + sqrt_one_minus_known * noise_known
+
+                # 已知区域用加噪真实数据替换，待修复区域保持去噪结果
+                x_t = x_t * mask_bool.float() + x_known_noisy * (1.0 - mask_bool.float())
+            else:
+                # 最后一步：已知区域直接用真实数据
+                x_t = x_t * mask_bool.float() + x_known * (1.0 - mask_bool.float())
+
+    return x_t
 
 
 def smooth_boundary(
@@ -128,7 +235,8 @@ def fuse_lesion(
     hu_min: float = -1000,
     hu_max: float = 400,
     device: str = "cuda",
-    smooth_boundary_width: int = 3
+    smooth_boundary_width: int = 3,
+    model_type: str = "unet"
 ) -> Path:
     """
     将病灶融合到模板中
@@ -151,6 +259,7 @@ def fuse_lesion(
         hu_max: 归一化最大 HU
         device: 计算设备
         smooth_boundary_width: 边界平滑宽度（0 表示不平滑）
+        model_type: 模型类型，"ddpm" 时使用 RePaint 推理管线
 
     Returns:
         output_path: 融合后的 CT 路径
@@ -184,6 +293,10 @@ def fuse_lesion(
     pd, ph, pw = patch_size
     step = pd - overlap
     
+    is_ddpm = model_type == "ddpm"
+    if is_ddpm:
+        logger.info("  使用 DDPM RePaint 推理管线（DDIM 50 步加速）")
+
     with torch.no_grad():
         for z in range(0, d - pd + 1, step):
             for y in range(0, h - ph + 1, step):
@@ -192,19 +305,32 @@ def fuse_lesion(
                     mask_patch = lesion_mask[z:z+pd, y:y+ph, x:x+pw]
                     if np.sum(mask_patch) == 0:
                         continue
-                    
+
                     # 提取 patch
                     input_patch = input_volume[z:z+pd, y:y+ph, x:x+pw]
-                    
+
                     # 转换为 tensor
                     input_tensor = torch.from_numpy(
                         input_patch[np.newaxis, np.newaxis]
                     ).float().to(device)
-                    
-                    # 推理
-                    output_patch = model(input_tensor)
-                    output_patch = output_patch.cpu().numpy()[0, 0]
-                    
+
+                    if is_ddpm:
+                        # DDPM 推理：使用 RePaint 策略的迭代去噪
+                        template_patch = torch.from_numpy(
+                            template_norm[z:z+pd, y:y+ph, x:x+pw][np.newaxis, np.newaxis]
+                        ).float().to(device)
+                        mask_tensor = torch.from_numpy(
+                            mask_patch[np.newaxis, np.newaxis]
+                        ).float().to(device)
+                        output_result = ddpm_inpaint_patch(
+                            model, template_patch, mask_tensor, device
+                        )
+                        output_patch = output_result.cpu().numpy()[0, 0]
+                    else:
+                        # 标准模型推理：单次前向传播
+                        output_patch = model(input_tensor)
+                        output_patch = output_patch.cpu().numpy()[0, 0]
+
                     # 只更新 mask 区域
                     mask_region = mask_patch > 0
                     output_volume[z:z+pd, y:y+ph, x:x+pw][mask_region] += \
