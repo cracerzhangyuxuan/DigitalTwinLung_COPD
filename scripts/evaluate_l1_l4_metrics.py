@@ -1,15 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-三模型四层评估脚本 (L1-L4)
+六模型四层评估脚本 (L1-L4) — 训练集样本 copd_001~003
 
-针对 U-Net / PartialConv / PatchGAN 三种生成模型，
-计算精选的 L1~L4 核心指标，验证理论预期。
+针对 U-Net / PartialConv / PatchGAN / AttGAN / MAE-PatchGAN / DDPM 六种模型，
+计算精选的 L1~L4 核心指标。动态检测可用的推理结果。
 
 输出:
-  results/model_comparison_metrics.json   — 结构化指标数据
+  results/model_comparison_metrics.json   — 结构化指标数据（覆盖旧占位数据）
   results/model_comparison_metrics.csv    — 平铺表格
-  results/model_comparison_report.md      — 实验报告
 """
 
 import sys, json, csv
@@ -24,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # ── 路径常量 ────────────────────────────────────────────────
-MODELS = ["unet", "partial_conv", "patchgan"]
+MODELS = ["unet", "partial_conv", "patchgan", "attgan", "mae_patchgan", "ddpm"]
 PATIENTS = ["copd_001", "copd_002", "copd_003"]
 FUSED_DIR = ROOT / "data" / "04_final_viz"
 MAPPED_DIR = ROOT / "data" / "03_mapped"
@@ -131,7 +130,7 @@ def get_best_slice(mask_3d):
 
 def main():
     print("=" * 70)
-    print("  三模型四层评估 (L1-L4)")
+    print("  六模型四层评估 (L1-L4) — 训练集样本 copd_001~003")
     print("=" * 70)
 
     # 加载标准模板（用于 Direct Warp 基线参考）
@@ -244,7 +243,7 @@ def main():
 
     # ── 汇总均值 ────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  三模型均值汇总")
+    print("  六模型均值汇总")
     print("=" * 70)
     for model in MODELS:
         rows = [r for r in all_results if r["model"] == model]

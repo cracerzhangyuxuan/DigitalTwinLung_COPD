@@ -1290,6 +1290,8 @@ def run_evaluation(args):
     all_wasserstein = []
     all_jacobian = []
     all_morpho_subjects = []
+    all_sharpness = []  # 新增：收集每个受试者的 Sharpness
+    all_frangi = []     # 新增：收集每个受试者的 Frangi Ratio
 
     if not subject_dirs:
         logger.warning(f"\n  ⚠ 未找到正常人配准数据: {normal_mapped_dir}")
@@ -1310,6 +1312,18 @@ def run_evaluation(args):
                 ws = TextureTopologyMetrics.compute_wasserstein(template_data, subj_data, lung_mask)
                 all_wasserstein.append(ws)
                 logger.info(f"    B3 Wasserstein = {ws['wasserstein_dist']:.2f} HU")
+
+                # B1. Sharpness — 计算每个受试者的边界清晰度
+                sharp = TextureTopologyMetrics.compute_sharpness(subj_data, lung_mask)
+                all_sharpness.append(sharp)
+                logger.info(f"    B1 Sharpness = {sharp['sharpness_laplacian_var']:.2f}")
+
+                # B2. Frangi Ratio — 计算每个受试者的管状结构度（如果未跳过）
+                if not args.skip_frangi:
+                    frangi = TextureTopologyMetrics.compute_frangi(subj_data, airway_mask, lung_mask)
+                    all_frangi.append(frangi)
+                    logger.info(f"    B2 Frangi Ratio = {frangi['frangi_ratio']:.2f}")
+
                 del subj_data
 
             # A1. Dice — 配准后肺叶标签 vs 模板肺叶标签
@@ -1348,6 +1362,28 @@ def run_evaluation(args):
 
             import gc
             gc.collect()
+
+    # ------ 汇总 B1 Sharpness (群体统计) ------
+    population_sharpness = {}
+    if all_sharpness:
+        sharp_vals = [s['sharpness_laplacian_var'] for s in all_sharpness]
+        population_sharpness = {
+            'mean': round(float(np.mean(sharp_vals)), 2),
+            'std': round(float(np.std(sharp_vals)), 2),
+            'n': len(sharp_vals)
+        }
+        logger.info(f"\n  B1 群体 Sharpness = {population_sharpness['mean']:.2f} ± {population_sharpness['std']:.2f} (n={population_sharpness['n']})")
+
+    # ------ 汇总 B2 Frangi Ratio (群体统计) ------
+    population_frangi = {}
+    if all_frangi:
+        frangi_vals = [f['frangi_ratio'] for f in all_frangi]
+        population_frangi = {
+            'mean': round(float(np.mean(frangi_vals)), 4),
+            'std': round(float(np.std(frangi_vals)), 4),
+            'n': len(frangi_vals)
+        }
+        logger.info(f"  B2 群体 Frangi Ratio = {population_frangi['mean']:.4f} ± {population_frangi['std']:.4f} (n={population_frangi['n']})")
 
     # ------ 汇总 B3 Wasserstein ------
     if all_wasserstein:
@@ -1467,6 +1503,8 @@ def run_evaluation(args):
             'per_subject_jacobian': all_jacobian,
             'template_morpho': template_morpho,
             'morpho_subjects': all_morpho_subjects,
+            'population_sharpness': population_sharpness,  # 新增：B1 群体统计
+            'population_frangi': population_frangi,        # 新增：B2 群体统计
         }, f, indent=2, ensure_ascii=False, default=str)
     logger.info(f"\n  ✓ JSON 指标: {json_path.name}")
 

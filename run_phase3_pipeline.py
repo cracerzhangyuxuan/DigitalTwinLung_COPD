@@ -1086,7 +1086,7 @@ def _generate_patient_report(
     from datetime import datetime
 
     # ====== 新逻辑：AI vs Real COPD + AI vs Embed 双轨对比 ======
-    # Warp (Direct Warp) 是≈类指标的参照基准 (Ref)
+    # Warp (Healthy Atlas) 是≈类指标的参照基准 (Ref)
     # Real COPD 替代原先 Warp 的位置，作为 AI 的主要对比对象
     m = metrics  # 简写
 
@@ -1157,9 +1157,9 @@ def _generate_patient_report(
         f.write(f"""## 纹理质量分析
 
 > **评估目标**：对比 AI 相较于 Embedded Template 的改进和优化。
-> ↑/↓ 指标按箭头方向直接比较数值；≈ 类指标以 Warp (Direct Warp) 为参照，越接近越好。
+> ↑/↓ 指标按箭头方向直接比较数值；≈ 类指标以 Real COPD 为参照，越接近越好。
 
-| 指标 | Warp(Ref) | Embed | AI | Real COPD | AI vs Real COPD | AI vs Real COPD改进 | AI vs Embed | AI vs Embed改进 |
+| 指标 | Healthy Atlas | Embed | AI | Real COPD | AI vs Real COPD | AI vs Real COPD改进 | AI vs Embed | AI vs Embed改进 |
 |------|-----------|-------|------|-----------|-----------------|-------------------|-------------|----------------|
 | 清晰度 (↑) | {m['sharpness_warp']:.1f} | {m['sharpness_real']:.1f} | {m['sharpness_ai']:.1f} | {m['sharpness_real_copd']:.1f} | {sharp_r_win} | {sharp_r_imp:+.1f}% | {sharp_e_win} | {sharp_e_imp:+.1f}% |
 | 边界梯度 (↓) | {m['boundary_grad_warp']:.2f} | {m['boundary_grad_real']:.2f} | {m['boundary_grad_ai']:.2f} | {m['boundary_grad_real_copd']:.2f} | {bound_r_win} | {bound_r_imp:+.1f}% | {bound_e_win} | {bound_e_imp:+.1f}% |
@@ -1188,7 +1188,7 @@ def _generate_texture_radar_chart(
     """
     生成综合质量雷达图（蜘蛛图）
 
-    展示三条曲线：Real COPD、AI Fused、Direct Warp。
+    展示三条曲线：Real COPD、AI Fused、Healthy Atlas。
     每个维度的节点位置直接对齐 Markdown 表格中的真实数值（通过 min-max
     归一化映射到 [0.1, 1.0] 区间），并在顶点处标注原始数值。
 
@@ -1231,9 +1231,9 @@ def _generate_texture_radar_chart(
 
     if include_sharpness_boundary:
         categories = ['Sharpness\n(↑)', 'Boundary\n(↓)',
-                      'GLCM\nContrast(↑)', 'GLCM\nEnergy(≈)',
-                      'GLCM\nEntropy(↑)', 'GLCM\nCorrelation(≈)',
-                      'GLCM\nHomogeneity(≈)']
+                      'GLCM\nContrast(↑)', 'GLCM\nEnergy(≈Real)',
+                      'GLCM\nEntropy(↑)', 'GLCM\nCorrelation(≈Real)',
+                      'GLCM\nHomogeneity(≈Real)']
         # 三组原始值：(real, ai, warp) × 7 维度
         raw_real = [sharpness_real, boundary_real,
                     contrast_real, energy_real, entropy_real,
@@ -1308,7 +1308,7 @@ def _generate_texture_radar_chart(
             color='#3498db', markersize=8)
     ax.fill(angles, ai_scores, alpha=0.20, color='#3498db')
 
-    ax.plot(angles, warp_scores, '^-', linewidth=2.5, label='Direct Warp',
+    ax.plot(angles, warp_scores, '^-', linewidth=2.5, label='Healthy Atlas',
             color='#e74c3c', markersize=8)
     ax.fill(angles, warp_scores, alpha=0.20, color='#e74c3c')
 
@@ -1396,8 +1396,8 @@ def run_model_evaluation(
     output_dir = Path(f'results/{model_type}')  # 合并后的输出目录
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 加载标准模板作为 Direct Warp 基线
-    # Direct Warp = 模板 + 病灶区域未经 AI 合成的原始 HU 值
+    # 加载标准模板作为 Healthy Atlas 基线
+    # Healthy Atlas = 健康肺模板在病灶区域的原始 HU 值（未经 AI 合成）
     atlas_dir = Path(paths.get('atlas', 'data/02_atlas'))
     airway_fusion_config = config.get('registration', {}).get('airway_fusion', {})
     airway_template_filename = airway_fusion_config.get(
@@ -1408,10 +1408,10 @@ def run_model_evaluation(
         template_path = atlas_dir / 'standard_template.nii.gz'
     if template_path.exists():
         template_data_for_warp = nib.load(str(template_path)).get_fdata()
-        logger.info(f"  Direct Warp 基线: {template_path.name}")
+        logger.info(f"  Healthy Atlas 基线: {template_path.name}")
     else:
         template_data_for_warp = None
-        logger.warning(f"  ⚠ 模板不存在，Direct Warp 将回退为 Real COPD")
+        logger.warning(f"  ⚠ 模板不存在，Healthy Atlas 将回退为 Real COPD")
 
     # 检查融合结果目录
     if not fused_dir.exists():
@@ -1482,8 +1482,8 @@ def run_model_evaluation(
             fused_emph = (fused_lesion < -950).sum() / len(fused_lesion)
 
             # ========== 高级纹理质量指标 ==========
-            # Direct Warp 基线：模板在病灶区域的原始 HU 值
-            # 概念：如果不用 AI，直接把病灶 mask 叠加到模板上，质量如何？
+            # Healthy Atlas 基线：健康模板在病灶区域的原始 HU 值
+            # 概念：如果不用 AI，健康模板在这个病灶位置的纹理特征如何？
             if template_data_for_warp is not None:
                 warp_data = template_data_for_warp
             else:
@@ -1757,9 +1757,9 @@ def run_model_evaluation(
 ## 纹理质量分析
 
 > **评估目标**：对比 AI 相较于 Embedded Template 的改进和优化。
-> ↑/↓ 指标按箭头方向直接比较数值；≈ 类指标以 Warp (Direct Warp) 为参照，越接近越好。
+> ↑/↓ 指标按箭头方向直接比较数值；≈ 类指标以 Real COPD 为参照，越接近越好。
 
-| 指标 | Warp(Ref) | Embed | AI | Real COPD | AI vs Real COPD | AI vs Real COPD改进 | AI vs Embed | AI vs Embed改进 |
+| 指标 | Healthy Atlas | Embed | AI | Real COPD | AI vs Real COPD | AI vs Real COPD改进 | AI vs Embed | AI vs Embed改进 |
 |------|-----------|-------|------|-----------|-----------------|-------------------|-------------|----------------|
 | 清晰度 (↑) | {avg_sharpness_warp:.1f} | {avg_sharpness_real:.1f} | {avg_sharpness_ai:.1f} | {avg_sharpness_real_copd:.1f} | {s_r_win} | {s_r_imp:+.1f}% | {s_e_win} | {s_e_imp:+.1f}% |
 | 边界梯度 (↓) | {avg_boundary_warp:.2f} | {avg_boundary_real:.2f} | {avg_boundary_ai:.2f} | {avg_boundary_real_copd:.2f} | {b_r_win} | {b_r_imp:+.1f}% | {b_e_win} | {b_e_imp:+.1f}% |
@@ -1770,9 +1770,9 @@ def run_model_evaluation(
 | GLCM 同质性 (≈) | {avg_glcm_homogeneity_warp:.4f} | {avg_glcm_homogeneity_real:.4f} | {avg_glcm_homogeneity_ai:.4f} | {avg_glcm_homogeneity_real_copd:.4f} | {gh_r_win} | {gh_r_imp:+.1f}% | {gh_e_win} | {gh_e_imp:+.1f}% |
 
 ### 列说明：
-- **Warp(Ref)**: Direct Warp（直接配准基线），≈类指标的参照基准
+- **Healthy Atlas**: 健康肺模板基线，提供健康纹理的参照对比
 - **Embed**: Embedded Template（病灶嵌入模板），AI 需要改进和超越的目标
-- **AI vs Real COPD**: AI 融合是否优于真实 COPD 数据（↑/↓直接比值，≈比距离 Warp）
+- **AI vs Real COPD**: AI 融合纹理与真实 COPD 纹理的接近程度（所有指标均以 Real COPD 为目标）
 - **AI vs Real COPD改进**: AI 相对 Real COPD 的改进幅度百分比
 - **AI vs Embed**: AI 融合是否优于 Embedded Template（核心评估维度）
 - **AI vs Embed改进**: AI 相对 Embed 的改进幅度百分比

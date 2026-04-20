@@ -87,13 +87,32 @@ def load_model(
 # DDPM 专用推理函数
 # ============================================================================
 
+def _build_ddpm_schedule(device, num_timesteps=1000, ddim_steps=10,
+                          beta_start=1e-4, beta_end=0.02):
+    """
+    预构建 DDPM 噪声调度参数（只调用一次，避免每个 patch 重复计算）
+
+    Returns:
+        alphas_cumprod: (T,) 累积 α 乘积
+        timesteps: DDIM 子序列（从大到小）
+    """
+    betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+    step_size = num_timesteps // ddim_steps
+    timesteps = list(range(0, num_timesteps, step_size))[::-1]
+    return alphas_cumprod, timesteps
+
+
 def ddpm_inpaint_patch(
     model: 'torch.nn.Module',
     template_patch: 'torch.Tensor',
     mask_patch: 'torch.Tensor',
     device: 'torch.device',
+    alphas_cumprod: 'torch.Tensor' = None,
+    timesteps: list = None,
     num_timesteps: int = 1000,
-    ddim_steps: int = 50,
+    ddim_steps: int = 10,
     beta_start: float = 1e-4,
     beta_end: float = 0.02,
 ) -> 'torch.Tensor':
@@ -110,22 +129,21 @@ def ddpm_inpaint_patch(
         template_patch: 归一化后的模板 patch (1, 1, D, H, W)
         mask_patch: 病灶 mask patch (1, 1, D, H, W)，mask>0 为待修复区域
         device: 计算设备
+        alphas_cumprod: 预计算的累积 α（可选，传入避免重复计算）
+        timesteps: 预计算的 DDIM 时间步子序列（可选）
         num_timesteps: 训练时使用的扩散步数 T
-        ddim_steps: DDIM 加速采样步数（默认 50）
+        ddim_steps: DDIM 加速采样步数（默认 10，从 50 降低以提速 5 倍）
         beta_start: β 起始值（须与训练一致）
         beta_end: β 终止值（须与训练一致）
 
     Returns:
         output_patch: 修复后的 patch (1, 1, D, H, W)
     """
-    # 构建噪声调度器（与训练一致）
-    betas = torch.linspace(beta_start, beta_end, num_timesteps, device=device)
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-    # DDIM 子序列：从 T 步中均匀选取 ddim_steps 个时间步
-    step_size = num_timesteps // ddim_steps
-    timesteps = list(range(0, num_timesteps, step_size))[::-1]  # 从大到小
+    # 如果未传入预计算参数，则构建（向后兼容）
+    if alphas_cumprod is None or timesteps is None:
+        alphas_cumprod, timesteps = _build_ddpm_schedule(
+            device, num_timesteps, ddim_steps, beta_start, beta_end
+        )
 
     # 将模板和 mask 移到设备
     x_known = template_patch.to(device)
@@ -294,8 +312,30 @@ def fuse_lesion(
     step = pd - overlap
     
     is_ddpm = model_type == "ddpm"
+    ddpm_steps = 10  # DDIM 采样步数（从 50 降到 10 以 5 倍提速，对低 epoch 模型影响极小）
+
+    # DDPM：预构建调度参数（避免每个 patch 重复计算）
+    ddpm_alphas_cumprod = None
+    ddpm_timesteps = None
     if is_ddpm:
-        logger.info("  使用 DDPM RePaint 推理管线（DDIM 50 步加速）")
+        ddpm_alphas_cumprod, ddpm_timesteps = _build_ddpm_schedule(
+            device, num_timesteps=1000, ddim_steps=ddpm_steps
+        )
+        logger.info(f"  使用 DDPM RePaint 推理管线（DDIM {ddpm_steps} 步加速）")
+
+    # ---- 预扫描：统计含 mask 的 patch 数量 (用于进度日志) ----
+    active_patches = 0
+    for z in range(0, d - pd + 1, step):
+        for y in range(0, h - ph + 1, step):
+            for x in range(0, w - pw + 1, step):
+                mp = lesion_mask[z:z+pd, y:y+ph, x:x+pw]
+                if np.sum(mp) > 0:
+                    active_patches += 1
+    logger.info(f"  滑动窗口: 体积={d}×{h}×{w}, patch={pd}³, step={step}, 含mask patch={active_patches}")
+
+    import time as _time
+    patch_count = 0
+    t_start = _time.time()
 
     with torch.no_grad():
         for z in range(0, d - pd + 1, step):
@@ -305,6 +345,8 @@ def fuse_lesion(
                     mask_patch = lesion_mask[z:z+pd, y:y+ph, x:x+pw]
                     if np.sum(mask_patch) == 0:
                         continue
+
+                    patch_count += 1
 
                     # 提取 patch
                     input_patch = input_volume[z:z+pd, y:y+ph, x:x+pw]
@@ -323,7 +365,9 @@ def fuse_lesion(
                             mask_patch[np.newaxis, np.newaxis]
                         ).float().to(device)
                         output_result = ddpm_inpaint_patch(
-                            model, template_patch, mask_tensor, device
+                            model, template_patch, mask_tensor, device,
+                            alphas_cumprod=ddpm_alphas_cumprod,
+                            timesteps=ddpm_timesteps,
                         )
                         output_patch = output_result.cpu().numpy()[0, 0]
                     else:
@@ -336,6 +380,17 @@ def fuse_lesion(
                     output_volume[z:z+pd, y:y+ph, x:x+pw][mask_region] += \
                         output_patch[mask_region]
                     weight_volume[z:z+pd, y:y+ph, x:x+pw][mask_region] += 1
+
+                    # 进度日志（每 10 个 patch 或最后一个 patch）
+                    if patch_count % 10 == 0 or patch_count == active_patches:
+                        elapsed = _time.time() - t_start
+                        avg_t = elapsed / patch_count
+                        eta = avg_t * (active_patches - patch_count)
+                        logger.info(
+                            f"  [{patch_count}/{active_patches}] "
+                            f"z={z} y={y} x={x} | "
+                            f"{elapsed:.1f}s elapsed, {avg_t:.2f}s/patch, ETA {eta:.0f}s"
+                        )
     
     # 处理重叠区域 (平均)
     weight_volume[weight_volume == 0] = 1

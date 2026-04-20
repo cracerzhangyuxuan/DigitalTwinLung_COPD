@@ -4,7 +4,7 @@
 验证集 L1-L4 四层评估脚本
 
 在未参与训练的验证集患者 (copd_024, copd_025, copd_026) 上，
-对 U-Net / PartialConv / PatchGAN 三种模型计算 L1~L4 核心指标。
+对 U-Net / PartialConv / PatchGAN / AttGAN / MAE-PatchGAN / DDPM 六种模型计算 L1~L4 核心指标。
 
 输出:
   results/validation_metrics.json   — 结构化指标数据（不覆盖训练集指标）
@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # ── 路径常量 ────────────────────────────────────────────────
-MODELS = ["unet", "partial_conv", "patchgan"]
-PATIENTS = ["copd_024", "copd_025", "copd_026"]  # 验证集（未参与训练）
+MODELS = ["unet", "partial_conv", "patchgan", "attgan", "mae_patchgan", "ddpm"]
+PATIENTS = ["copd_024", "copd_025", "copd_026", "copd_027", "copd_028", "copd_029"]  # 验证集（未参与训练）
 FUSED_DIR = ROOT / "data" / "04_final_viz"
 MAPPED_DIR = ROOT / "data" / "03_mapped"
 TEMPLATE_PATH = ROOT / "data" / "02_atlas" / "standard_template_with_airway.nii.gz"
@@ -125,7 +125,7 @@ def get_best_slice(mask_3d):
 
 def main():
     print("=" * 70)
-    print("  验证集 L1-L4 四层评估 (copd_024 ~ copd_026)")
+    print("  验证集 L1-L4 四层评估 (copd_024 ~ copd_029)")
     print("  数据口径: 未参与训练的验证集样本")
     print("=" * 70)
 

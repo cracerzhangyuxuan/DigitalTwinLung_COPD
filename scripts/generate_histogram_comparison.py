@@ -39,7 +39,11 @@ _setup_academic_fonts()
 BASE = os.path.join(os.path.dirname(__file__), "..")
 MODELS = ["unet", "partial_conv", "patchgan"]
 PATIENTS = ["copd_001", "copd_002", "copd_003"]
+PATCHGAN_EXTRA_PATIENTS = [
+    "copd_024", "copd_025", "copd_026", "copd_027", "copd_028", "copd_029"
+]
 MODEL_LABELS = {"unet": "U-Net", "partial_conv": "PartialConv", "patchgan": "PatchGAN"}
+LEGEND_FONT_SIZE = 20
 
 # 校准参数（与 inference_fuse.py 完全一致）
 CAL_TARGET_MEAN = -965.0
@@ -163,8 +167,8 @@ def generate_single_histogram(model, patient_id, base_dir):
     ax_hist.set_xlabel("HU Value", fontsize=16, fontweight='bold')
     ax_hist.set_ylabel("Density", fontsize=16, fontweight='bold')
     ax_hist.set_title("HU Distribution in 3D Lesion", fontsize=20, fontweight='bold')
-    ax_hist.legend(loc='upper right', fontsize=15, framealpha=0.9,
-                   prop={'family': 'Times New Roman'})
+    ax_hist.legend(loc='upper right', fontsize=LEGEND_FONT_SIZE, framealpha=0.9,
+                   prop={'family': 'Times New Roman', 'size': LEGEND_FONT_SIZE})
     ax_hist.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
     ax_hist.set_axisbelow(True)
     ax_hist.tick_params(axis='both', which='major', labelsize=14)
@@ -222,10 +226,12 @@ def generate_single_histogram(model, patient_id, base_dir):
 
 
 def main():
-    """批量生成 3 模型 × 3 患者 = 9 张直方图 + 汇总图"""
+    """批量生成 3 模型×3患者 + PatchGAN额外6例(024~029) 直方图，并输出汇总。"""
     import json
 
     summary_stats = {}
+
+    # 1) 默认批量：3 模型 × 3 患者
     for model in MODELS:
         for pid in PATIENTS:
             print(f"\n{'='*60}")
@@ -238,6 +244,19 @@ def main():
                          "emphysema_pct": round(v['emphysema_ratio'], 2)}
                     for k, v in s.items()
                 }
+
+    # 2) PatchGAN 扩展批量：copd_024~copd_029
+    for pid in PATCHGAN_EXTRA_PATIENTS:
+        print(f"\n{'='*60}")
+        print(f"  Generating: {MODEL_LABELS['patchgan']} x {pid}")
+        print(f"{'='*60}")
+        s = generate_single_histogram("patchgan", pid, BASE)
+        if s:
+            summary_stats[f"patchgan_{pid}"] = {
+                k: {"mean": round(v['mean'], 2), "std": round(v['std'], 2),
+                     "emphysema_pct": round(v['emphysema_ratio'], 2)}
+                for k, v in s.items()
+            }
 
     # 将 patchgan×copd_001 复制为报告引用的汇总图
     src = os.path.join(BASE, "results", "patchgan", "copd_001",
