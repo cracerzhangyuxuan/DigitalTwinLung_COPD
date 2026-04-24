@@ -254,7 +254,9 @@ def fuse_lesion(
     hu_max: float = 400,
     device: str = "cuda",
     smooth_boundary_width: int = 3,
-    model_type: str = "unet"
+    model_type: str = "unet",
+    patient_condition: Optional[dict] = None,
+    model_condition: Optional['torch.Tensor'] = None
 ) -> Path:
     """
     将病灶融合到模板中
@@ -264,7 +266,8 @@ def fuse_lesion(
     2. 在 mask 区域挖空
     3. 使用 Inpainting 模型填充
     4. 边界平滑（可选）
-    5. 保存融合结果
+    5. 【阶段①】自适应 HU 校准（基于患者真实病灶统计）
+    6. 保存融合结果
 
     Args:
         template_path: 模板 CT 路径
@@ -278,6 +281,18 @@ def fuse_lesion(
         device: 计算设备
         smooth_boundary_width: 边界平滑宽度（0 表示不平滑）
         model_type: 模型类型，"ddpm" 时使用 RePaint 推理管线
+        patient_condition: 患者条件信息（阶段①自适应 HU 校准用）
+                          格式: {'lesion_HU_mean': float, 'lesion_HU_std': float}
+                          若为 None，则使用固定先验值 (-965.0, 45.0)
+        model_condition: 归一化后的 5 维条件向量 tensor（阶段② FiLM 推理用）
+                        形状: (1, 5)，已归一化到 [0, 1]
+                        当 model 是 ConditionedGenerator 时，每个 patch 推理都会传入此 condition
+                        若为 None，则模型以无条件模式运行（Exp-0/Exp-1）
+
+    CICI-FiLM 实验模式说明:
+        - Exp-0 (Baseline): patient_condition=None, model_condition=None
+        - Exp-1 (自适应校准): patient_condition={c₃,c₄}, model_condition=None
+        - Exp-2 (FiLM 微调): patient_condition=None, model_condition=(1,5) tensor
 
     Returns:
         output_path: 融合后的 CT 路径
@@ -372,7 +387,15 @@ def fuse_lesion(
                         output_patch = output_result.cpu().numpy()[0, 0]
                     else:
                         # 标准模型推理：单次前向传播
-                        output_patch = model(input_tensor)
+                        # 【CICI-FiLM Exp-2】: 如果提供了 model_condition，传给模型
+                        # ConditionedGenerator.forward(x, condition) 会激活 FiLM 调制
+                        # 无条件模式（Exp-0/Exp-1）: model_condition=None，等价于 backbone(x)
+                        if model_condition is not None:
+                            # model_condition 形状 (1, 5)，已在调用方构造好
+                            cond_tensor = model_condition.to(device)
+                            output_patch = model(input_tensor, cond_tensor)
+                        else:
+                            output_patch = model(input_tensor)
                         output_patch = output_patch.cpu().numpy()[0, 0]
 
                     # 只更新 mask 区域
@@ -456,12 +479,35 @@ def fuse_lesion(
     if np.sum(lesion_indices) > 0:
         lesion_pixels = output_hu[lesion_indices]
 
-        # 目标统计参数 (来自真实 COPD 数据的先验知识)
-        # 真实肺气肿区域: 均值约 -965 到 -975，标准差约 40-50
-        target_stats = {
-            'mean': -965.0,  # 目标均值：让它比阈值(-950)更黑
-            'std': 45.0      # 目标对比度：增加标准差以提升 GLCM Contrast
-        }
+        # ============================================================
+        # 【CICI-FiLM 阶段①】自适应 HU 校准
+        # ============================================================
+        # 根据 patient_condition 动态设置 target_stats
+        # - Exp-0 (Baseline): patient_condition=None，使用固定先验值
+        # - Exp-1 (自适应校准): patient_condition 包含患者真实 c₃/c₄
+        if patient_condition is not None:
+            # 从患者真实病灶统计中提取目标值
+            target_stats = {
+                'mean': patient_condition.get('lesion_HU_mean', -965.0),
+                'std': patient_condition.get('lesion_HU_std', 45.0)
+            }
+            logger.info(
+                f"[CICI-FiLM Exp-1] 自适应 HU 校准: "
+                f"mean={target_stats['mean']:.1f} HU, "
+                f"std={target_stats['std']:.1f} HU"
+            )
+        else:
+            # 回退到固定先验值（Exp-0 baseline）
+            target_stats = {
+                'mean': -965.0,  # 目标均值：让它比阈值(-950)更黑
+                'std': 45.0      # 目标对比度：增加标准差以提升 GLCM Contrast
+            }
+            logger.info(
+                f"[Exp-0 Baseline] 固定 HU 校准: "
+                f"mean={target_stats['mean']:.1f} HU, "
+                f"std={target_stats['std']:.1f} HU"
+            )
+        # ============================================================
 
         # 执行校准
         calibrated_pixels = match_histogram_stats(lesion_pixels, target_stats)

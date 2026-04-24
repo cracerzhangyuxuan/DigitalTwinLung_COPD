@@ -51,7 +51,8 @@ class Trainer:
         generator: 'nn.Module',
         discriminator: Optional['nn.Module'] = None,
         config: Optional[dict] = None,
-        device: str = "cuda"
+        device: str = "cuda",
+        use_condition: bool = False
     ):
         if torch is None:
             raise ImportError("PyTorch 未安装")
@@ -62,17 +63,26 @@ class Trainer:
         # 模型
         self.generator = generator.to(self.device)
         self.discriminator = discriminator.to(self.device) if discriminator else None
+        self.use_condition = use_condition
 
         # 默认配置
         self.config = config or {}
         train_config = self.config.get('training', {})
         self.epochs = train_config.get('epochs', 100)
 
-        # 优化器
+        # 优化器（CICI-FiLM 阶段②：只训练 FiLM 分支）
         lr = train_config.get('learning_rate', 0.0002)
         betas = (train_config.get('beta1', 0.5), train_config.get('beta2', 0.999))
 
-        self.g_optimizer = Adam(self.generator.parameters(), lr=lr, betas=betas)
+        if use_condition:
+            # 只优化条件分支参数（cond_encoder + film）
+            trainable_params = [p for p in self.generator.parameters() if p.requires_grad]
+            self.g_optimizer = Adam(trainable_params, lr=lr, betas=betas)
+            logger.info(f"[CICI-FiLM] 仅训练条件分支: {sum(p.numel() for p in trainable_params):,} 参数")
+        else:
+            # 训练所有参数（Exp-0 baseline）
+            self.g_optimizer = Adam(self.generator.parameters(), lr=lr, betas=betas)
+
         if self.discriminator:
             self.d_optimizer = Adam(self.discriminator.parameters(), lr=lr, betas=betas)
 
@@ -129,7 +139,7 @@ class Trainer:
             return StepLR(optimizer, step_size=50, gamma=0.5)
     
     def train_epoch(self, train_loader: 'DataLoader') -> Dict[str, float]:
-        """训练一个 epoch"""
+        """训练一个 epoch（CICI-FiLM 条件化版本）"""
         self.generator.train()
         if self.discriminator:
             self.discriminator.train()
@@ -141,8 +151,18 @@ class Trainer:
             target = batch['target'].to(self.device)
             mask = batch['mask'].to(self.device)
 
-            # 生成器前向传播
-            pred = self.generator(input_data)
+            # 获取条件向量（CICI-FiLM 阶段②）
+            condition = batch.get('condition', None)
+            if condition is not None:
+                condition = condition.to(self.device)
+
+            # 生成器前向传播（传递条件向量）
+            if self.use_condition and condition is not None:
+                # ConditionedGenerator 需要 condition 参数
+                pred = self.generator(input_data, condition)
+            else:
+                # 普通生成器（Exp-0 baseline）
+                pred = self.generator(input_data)
 
             # GAN 训练：先更新判别器，再更新生成器
             if self.discriminator:
@@ -190,20 +210,30 @@ class Trainer:
         return epoch_losses
     
     def validate(self, val_loader: 'DataLoader') -> Dict[str, float]:
-        """验证"""
+        """验证（CICI-FiLM 条件化版本）"""
         self.generator.eval()
-        
+
         val_losses = {'reconstruction': 0, 'total': 0}
-        
+
         with torch.no_grad():
             for batch in val_loader:
                 input_data = batch['input'].to(self.device)
                 target = batch['target'].to(self.device)
                 mask = batch['mask'].to(self.device)
-                
-                pred = self.generator(input_data)
+
+                # 获取条件向量（CICI-FiLM 阶段②）
+                condition = batch.get('condition', None)
+                if condition is not None:
+                    condition = condition.to(self.device)
+
+                # 生成器前向传播（传递条件向量）
+                if self.use_condition and condition is not None:
+                    pred = self.generator(input_data, condition)
+                else:
+                    pred = self.generator(input_data)
+
                 losses = self.criterion.generator_loss(pred, target, mask)
-                
+
                 for key in val_losses:
                     if key in losses:
                         val_losses[key] += losses[key].item()

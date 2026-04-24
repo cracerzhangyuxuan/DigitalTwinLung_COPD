@@ -522,15 +522,15 @@ Feature-wise Linear Modulation，实现病灶严重度可控生成。
 架构特点:
   - backbone (InpaintingUNet / AttentionUNet) 完全不改、权重完全复用
   - 仅在最终输出层做一次 channel-wise affine 调制
-  - 训练时冻结 backbone，只训练 FiLM 参数 (2,530 / 22.5M = 0.011%)
+  - 训练时冻结 backbone，只训练 FiLM 参数 (2,434 / 22.5M = 0.010%)
   - condition=None 时自动退化为无条件模式（与原模型行为一致）
 
 使用方法:
     backbone = InpaintingUNet()
     backbone.load_state_dict(pretrained_weights)
-    model = ConditionedGenerator(backbone, cond_dim=8)
+    model = ConditionedGenerator(backbone, cond_dim=5)
     model.freeze_backbone()
-    output = model(x, condition)  # condition: (B, 8) or None
+    output = model(x, condition)  # condition: (B, 5) or None
 """
 import torch
 import torch.nn as nn

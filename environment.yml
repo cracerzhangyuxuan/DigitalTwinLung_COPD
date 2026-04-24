@@ -1,0 +1,31 @@
+name: dtlung-cici-film
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - numpy>=1.21,<1.25
+  - scipy>=1.7
+  - scikit-image>=0.19
+  - scikit-learn>=1.0
+  - pandas>=1.4
+  - nibabel>=4.0
+  - pydicom>=2.3
+  - simpleitk>=2.2
+  - matplotlib>=3.5
+  - pyyaml>=6.0
+  - colorlog>=6.0
+  - tqdm>=4.64
+  - pillow>=9.0
+  - pytorch=2.0.0
+  - torchvision=0.15.1
+  - pytorch-cuda=11.8
+  - pip:
+      - opencv-python-headless>=4.5.0
+      - antspyx>=0.3.0
+      - lungmask>=0.2.20
+      - raidionicsrads>=1.0.0
+
