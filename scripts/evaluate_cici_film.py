@@ -124,19 +124,31 @@ def main():
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
 
+    print(f'开始评估...')
+    print(f'患者列表: {args.patients}')
+    print(f'加载 Atlas 肺 mask: {args.atlas_lung_mask}')
     atlas_lung_mask = load_nifti(args.atlas_lung_mask)
+    print(f'  ✓ Atlas mask shape: {atlas_lung_mask.shape}')
+
     report = {'exp0': {'patients': {}}, 'exp1': {'patients': {}}}
     for exp_name, exp_dir in [('exp0', Path(args.exp0_dir)), ('exp1', Path(args.exp1_dir))]:
+        print(f'\n处理 {exp_name.upper()}...')
         for pid in args.patients:
-            report[exp_name]['patients'][pid] = evaluate_one(
-                exp_dir, pid, Path(args.ref_ct_dir), Path(args.ref_lung_mask_dir), Path(args.mapped_dir), atlas_lung_mask
-            )
+            print(f'  评估 {pid}...', end=' ', flush=True)
+            try:
+                report[exp_name]['patients'][pid] = evaluate_one(
+                    exp_dir, pid, Path(args.ref_ct_dir), Path(args.ref_lung_mask_dir), Path(args.mapped_dir), atlas_lung_mask
+                )
+                print(f'✓')
+            except Exception as e:
+                print(f'✗ 失败: {e}')
+                raise
         report[exp_name]['summary'] = summarize(report[exp_name]['patients'])
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
-    print(f'评估完成: {out}')
+    print(f'\n评估完成: {out}')
 
 
 if __name__ == '__main__':
