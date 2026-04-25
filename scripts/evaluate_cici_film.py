@@ -54,7 +54,16 @@ def compute_ssim_slicewise(ref_vol, pred_vol, mask):
         x0, x1 = xs.min(), xs.max() + 1
         ref = ref_vol[y0:y1, x0:x1, z]
         pred = pred_vol[y0:y1, x0:x1, z]
-        scores.append(structural_similarity(ref, pred, data_range=1400.0))
+        min_side = min(ref.shape)
+        if min_side < 3:
+            continue
+        win_size = min(7, min_side if min_side % 2 == 1 else min_side - 1)
+        if win_size < 3:
+            continue
+        try:
+            scores.append(structural_similarity(ref, pred, data_range=1400.0, win_size=win_size))
+        except ValueError:
+            continue
     return float(np.mean(scores)) if scores else 0.0
 
 
