@@ -89,7 +89,8 @@ def evaluate_one(exp_dir, pid, ref_ct_dir, ref_lung_dir, mapped_dir, atlas_lung_
     lung_fused = fused[atlas_lung]
 
     return {
-        'delta_ei_pct': abs(ei_fused - ei_ref) / (ei_ref + 1e-10) * 100.0,
+        'delta_ei_rel_pct': abs(ei_fused - ei_ref) / (ei_ref + 1e-10) * 100.0,
+        'delta_ei_abs_pp': abs(ei_fused - ei_ref),
         'ei_fused_pct': ei_fused,
         'ei_ref_pct': ei_ref,
         'hu_kl': kl_divergence(fused_lesion, ref_lesion, np.arange(-1000, 405, 5)) if fused_lesion.size and ref_lesion.size else None,
