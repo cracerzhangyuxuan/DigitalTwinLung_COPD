@@ -113,9 +113,10 @@ def summarize(patient_metrics):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='评估 Exp-0/Exp-1 的统计-生理等价性指标')
+    parser = argparse.ArgumentParser(description='评估 Exp-0/Exp-1/Exp-2 的统计-生理等价性指标')
     parser.add_argument('--exp0-dir', required=True)
     parser.add_argument('--exp1-dir', required=True)
+    parser.add_argument('--exp2-dir', default=None, help='Exp-2 结果目录（可选）')
     parser.add_argument('--ref-ct-dir', required=True)
     parser.add_argument('--ref-lung-mask-dir', required=True)
     parser.add_argument('--mapped-dir', required=True)
@@ -130,8 +131,13 @@ def main():
     atlas_lung_mask = load_nifti(args.atlas_lung_mask)
     print(f'  ✓ Atlas mask shape: {atlas_lung_mask.shape}')
 
-    report = {'exp0': {'patients': {}}, 'exp1': {'patients': {}}}
-    for exp_name, exp_dir in [('exp0', Path(args.exp0_dir)), ('exp1', Path(args.exp1_dir))]:
+    exp_dirs = [('exp0', Path(args.exp0_dir)), ('exp1', Path(args.exp1_dir))]
+    if args.exp2_dir:
+        exp_dirs.append(('exp2', Path(args.exp2_dir)))
+
+    report = {name: {'patients': {}} for name, _ in exp_dirs}
+
+    for exp_name, exp_dir in exp_dirs:
         print(f'\n处理 {exp_name.upper()}...')
         for pid in args.patients:
             print(f'  评估 {pid}...', end=' ', flush=True)

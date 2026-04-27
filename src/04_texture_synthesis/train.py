@@ -311,7 +311,7 @@ class Trainer:
         return self.history
     
     def save_checkpoint(self, path: Union[str, Path]) -> None:
-        """保存检查点"""
+        """保存检查点（原子性保存，防止损坏）"""
         checkpoint = {
             'epoch': self.current_epoch,
             'generator_state_dict': self.generator.state_dict(),
@@ -319,12 +319,27 @@ class Trainer:
             'best_loss': self.best_loss,
             'history': self.history,
         }
-        
+
         if self.discriminator:
             checkpoint['discriminator_state_dict'] = self.discriminator.state_dict()
             checkpoint['d_optimizer_state_dict'] = self.d_optimizer.state_dict()
-        
-        torch.save(checkpoint, path)
+
+        # 原子性保存：先保存到临时文件，成功后再重命名
+        path = Path(path)
+        temp_path = path.parent / f"{path.stem}_tmp{path.suffix}"
+
+        try:
+            torch.save(checkpoint, temp_path)
+            # 验证文件可读
+            torch.load(temp_path, map_location='cpu')
+            # 重命名为目标文件
+            if path.exists():
+                path.unlink()
+            temp_path.rename(path)
+        except Exception as e:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise RuntimeError(f"保存 checkpoint 失败: {e}")
     
     def load_checkpoint(self, path: Union[str, Path]) -> None:
         """加载检查点"""
