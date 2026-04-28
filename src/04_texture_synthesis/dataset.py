@@ -223,9 +223,9 @@ class LungPatchDataset(Dataset):
     
     def _extract_patient_id(self, ct_path: Path) -> str:
         """从 CT 文件路径提取患者 ID"""
-        # 假设文件名格式为 copd_XXX_clean.nii.gz 或 XXX.nii.gz
+        # 支持格式: copd_XXX_clean.nii.gz, copd_XXX_warped.nii.gz, XXX.nii.gz
         stem = ct_path.stem.replace('.nii', '')
-        patient_id = stem.replace('copd_', '').replace('_clean', '')
+        patient_id = stem.replace('copd_', '').replace('_clean', '').replace('_warped', '')
         return patient_id
 
     def _get_condition_vector(self, vol_idx: int) -> Optional[np.ndarray]:

@@ -12,21 +12,21 @@ CICI-FiLM 推理脚本
    python scripts/inference_cici_film.py \\
      --mode exp1 \\
      --backbone-checkpoint checkpoints/patchgan/best.pth \\
-     --template data/02_atlas/insp_template.nii.gz \\
-     --mask data/copd_masks/mask_J010.nii.gz \\
+     --template data/02_atlas/standard_template.nii.gz \\
+     --mask data/03_mapped/copd_024/copd_024_warped_lesion.nii.gz \\
      --patient-features data/patient_features.json \\
-     --patient-id J010 \\
-     --output results/exp1_J010.nii.gz
+     --patient-id copd_024 \\
+     --output results/cici_film/exp1/copd_024.nii.gz
 
 2. 阶段② FiLM 微调推理：
    python scripts/inference_cici_film.py \\
      --mode exp2 \\
      --film-checkpoint checkpoints/cici_film/best.pth \\
-     --template data/02_atlas/insp_template.nii.gz \\
-     --mask data/copd_masks/mask_J010.nii.gz \\
+     --template data/02_atlas/standard_template.nii.gz \\
+     --mask data/03_mapped/copd_024/copd_024_warped_lesion.nii.gz \\
      --patient-features data/patient_features.json \\
-     --patient-id J010 \\
-     --output results/exp2_J010.nii.gz
+     --patient-id copd_024 \\
+     --output results/cici_film/exp2/copd_024.nii.gz
 """
 
 import argparse
@@ -91,11 +91,9 @@ def main():
     parser.add_argument('--output', required=True, help='输出路径')
     parser.add_argument('--device', default='cuda', help='设备')
     parser.add_argument('--mask-dilation', type=int, default=0,
-                        help='Lesion mask 最大膨胀迭代次数（默认0=不膨胀）')
+                        help='Lesion mask 膨胀迭代次数（方案D，默认0=不膨胀）')
     parser.add_argument('--atlas-lung-mask', default=None,
                         help='Atlas 肺区 mask 路径，用于约束膨胀范围（可选）')
-    parser.add_argument('--adaptive-mask-dilation', action='store_true',
-                        help='启用基于目标 EI 的自适应 mask 膨胀（方案D升级版）')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -114,8 +112,7 @@ def main():
     logger.info(f"  c₄ (lesion_HU_std): {patient_condition['lesion_HU_std']:.1f} HU")
     logger.info(f"  c₅ (GOLD): {patient_condition['GOLD']}")
 
-    patient_condition_for_calibration = patient_condition.copy()
-    use_adaptive_hu_calibration = False
+    patient_condition_for_calibration = None
     model_condition_tensor = None
     if args.mode in ('exp0', 'exp1'):
         if not args.backbone_checkpoint:
@@ -127,7 +124,10 @@ def main():
         logger.info(f'✓ 加载 backbone: {args.backbone_checkpoint}')
         if args.mode == 'exp1':
             logger.info('\n[Exp-1] 阶段① 自适应 HU 校准（零训练）')
-            use_adaptive_hu_calibration = True
+            patient_condition_for_calibration = {
+                'lesion_HU_mean': patient_condition['lesion_HU_mean'],
+                'lesion_HU_std': patient_condition['lesion_HU_std'],
+            }
         else:
             logger.info('\n[Exp-0] 无条件 Baseline（固定 HU 校准）')
     else:
@@ -155,8 +155,6 @@ def main():
         model_condition=model_condition_tensor,
         mask_dilation=args.mask_dilation,
         atlas_lung_mask_path=args.atlas_lung_mask,
-        use_adaptive_hu_calibration=use_adaptive_hu_calibration,
-        adaptive_mask_dilation=args.adaptive_mask_dilation,
     )
     logger.info(f'\n✓ 推理完成: {output_path}')
 
