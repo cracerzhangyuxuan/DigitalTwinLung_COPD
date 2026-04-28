@@ -256,7 +256,9 @@ def fuse_lesion(
     smooth_boundary_width: int = 3,
     model_type: str = "unet",
     patient_condition: Optional[dict] = None,
-    model_condition: Optional['torch.Tensor'] = None
+    model_condition: Optional['torch.Tensor'] = None,
+    mask_dilation: int = 0,
+    atlas_lung_mask_path: Optional[Union[str, Path]] = None,
 ) -> Path:
     """
     将病灶融合到模板中
@@ -473,7 +475,27 @@ def fuse_lesion(
         return np.clip(matched, -1024, 400)
 
     # 1. 定义病灶区域 (根据 mask)
-    lesion_indices = lesion_mask > 0
+    # 【方案D】自适应 Lesion Mask 膨胀（仅用于 HU 校准，不改变 inpainting 区域）
+    calibration_mask = lesion_mask.copy()
+    if mask_dilation > 0:
+        try:
+            from scipy.ndimage import binary_dilation
+            calibration_mask = binary_dilation(
+                calibration_mask > 0, iterations=mask_dilation
+            ).astype(np.float32)
+            if atlas_lung_mask_path is not None:
+                atlas_lung = load_nifti(atlas_lung_mask_path) > 0
+                calibration_mask = ((calibration_mask > 0) & atlas_lung).astype(np.float32)
+            orig_v = int((lesion_mask > 0).sum())
+            dil_v  = int((calibration_mask > 0).sum())
+            logger.info(
+                f"[方案D] Lesion mask 膨胀 {mask_dilation} 次: "
+                f"{orig_v} → {dil_v} 体素 (×{dil_v / max(orig_v, 1):.1f})"
+            )
+        except ImportError:
+            logger.warning("[方案D] scipy 未安装，跳过 mask 膨胀")
+
+    lesion_indices = calibration_mask > 0
 
     # 2. 仅对病灶区域进行直方图校准
     if np.sum(lesion_indices) > 0:

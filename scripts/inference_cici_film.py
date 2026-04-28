@@ -90,6 +90,10 @@ def main():
     parser.add_argument('--patient-id', required=True, help='患者 ID，支持 024 或 copd_024')
     parser.add_argument('--output', required=True, help='输出路径')
     parser.add_argument('--device', default='cuda', help='设备')
+    parser.add_argument('--mask-dilation', type=int, default=0,
+                        help='Lesion mask 膨胀迭代次数（方案D，默认0=不膨胀）')
+    parser.add_argument('--atlas-lung-mask', default=None,
+                        help='Atlas 肺区 mask 路径，用于约束膨胀范围（可选）')
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -149,6 +153,8 @@ def main():
         model_type='patchgan',
         patient_condition=patient_condition_for_calibration,
         model_condition=model_condition_tensor,
+        mask_dilation=args.mask_dilation,
+        atlas_lung_mask_path=args.atlas_lung_mask,
     )
     logger.info(f'\n✓ 推理完成: {output_path}')
 
