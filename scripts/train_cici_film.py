@@ -48,6 +48,12 @@ def main():
     parser.add_argument('--batch-size', type=int, default=4, help='批大小')
     parser.add_argument('--lr', type=float, default=0.0001, help='学习率')
     parser.add_argument('--device', default='cuda', help='设备')
+    parser.add_argument('--lambda-ei', type=float, default=0.0,
+                        help='方案C: EI 感知 Loss 权重（默认0=禁用）')
+    parser.add_argument('--lambda-contrast', type=float, default=0.0,
+                        help='方案A: 条件响应 Loss 权重（默认0=禁用）')
+    parser.add_argument('--ei-temperature', type=float, default=10.0,
+                        help='方案C: soft EI sigmoid 温度参数')
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -106,7 +112,10 @@ def main():
                 'adversarial': 0.01,
                 'hu_constraint': 0.5
             },
-            'enable_hu_constraint': True
+            'enable_hu_constraint': True,
+            'lambda_ei': args.lambda_ei,
+            'lambda_contrast': args.lambda_contrast,
+            'ei_temperature': args.ei_temperature,
         }
     }
     

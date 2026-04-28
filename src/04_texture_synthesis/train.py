@@ -68,6 +68,17 @@ class Trainer:
         # 默认配置
         self.config = config or {}
         train_config = self.config.get('training', {})
+
+        # ---- 方案 C + A 参数 ----
+        self.lambda_ei = float(train_config.get('lambda_ei', 0.0))
+        self.lambda_contrast = float(train_config.get('lambda_contrast', 0.0))
+        self.ei_temperature = float(train_config.get('ei_temperature', 10.0))
+        self.hu_min = -1000.0
+        self.hu_max = 400.0
+        if self.lambda_ei > 0:
+            logger.info(f"[方案C] EI Loss: λ={self.lambda_ei}, τ={self.ei_temperature}")
+        if self.lambda_contrast > 0:
+            logger.info(f"[方案A] 条件响应 Loss: λ={self.lambda_contrast}")
         self.epochs = train_config.get('epochs', 100)
 
         # 优化器（CICI-FiLM 阶段②：只训练 FiLM 分支）
@@ -120,7 +131,11 @@ class Trainer:
         # 训练状态
         self.current_epoch = 0
         self.best_loss = float('inf')
-        self.history = {'train_loss': [], 'val_loss': [], 'ssim': [], 'psnr': []}
+        self.history = {
+            'train_loss': [], 'val_loss': [], 'ssim': [], 'psnr': [],
+            'train_recon_loss': [], 'train_ei_loss': [], 'train_contrast_loss': [],
+            'val_recon_loss': [], 'val_ei_loss': [], 'val_contrast_loss': [],
+        }
 
     def _create_scheduler(self, optimizer, scheduler_type: str, warmup_epochs: int):
         """创建学习率调度器"""
@@ -137,14 +152,89 @@ class Trainer:
             return LambdaLR(optimizer, warmup_cosine_lambda)
         else:
             return StepLR(optimizer, step_size=50, gamma=0.5)
+
+    # ================================================================
+    # 方案 C：Soft EI Loss
+    # ================================================================
+    def _compute_soft_ei(self, pred: 'torch.Tensor') -> 'torch.Tensor':
+        """计算 batch 中每个样本的 soft EI（可导近似）
+
+        Args:
+            pred: 模型输出，归一化空间 [0,1]，shape (B, 1, D, H, W)
+
+        Returns:
+            soft_ei: (B,) 每个样本的 soft EI 值 ∈ (0,1)
+        """
+        # 反归一化到 HU 空间
+        hu = pred * (self.hu_max - self.hu_min) + self.hu_min  # [0,1] → [-1000, 400]
+        # soft EI: sigmoid((-950 - hu) / tau)，HU 越低于 -950 值越接近 1
+        soft_ei_map = torch.sigmoid((-950.0 - hu) / self.ei_temperature)
+        # 对每个样本取空间均值
+        B = pred.shape[0]
+        return soft_ei_map.view(B, -1).mean(dim=1)
+
+    # ================================================================
+    # 方案 A：条件响应一致性损失
+    # ================================================================
+    def _compute_contrast_loss(
+        self, pred: 'torch.Tensor', input_data: 'torch.Tensor',
+        condition: 'torch.Tensor'
+    ) -> 'torch.Tensor':
+        """条件响应一致性：不同 EI 条件应产生方向一致的输出差异
+
+        对 batch 内的每个样本，构造一个扰动条件（EI 翻转到 0.5 的对侧），
+        重新 forward 一次，要求：
+            EI_orig > EI_pert → 输出应更暗（均值更低）
+            EI_orig < EI_pert → 输出应更亮（均值更高）
+
+        Loss = ReLU( -sign(ei_diff) * output_diff )
+        当方向一致时 loss=0，方向不一致时 loss>0。
+
+        Args:
+            pred: 原始条件下的输出 (B, 1, D, H, W)
+            input_data: 输入 (B, 1, D, H, W)
+            condition: 原始条件向量 (B, 5)
+
+        Returns:
+            contrast_loss: 标量
+        """
+        B = condition.shape[0]
+        if B < 1:
+            return torch.tensor(0.0, device=pred.device)
+
+        # 构造扰动条件：将 c₁(EI) 翻转到 0.5 的对侧
+        # 如果原始 EI=0.02，扰动 EI=0.98；原始 EI=0.18，扰动 EI=0.82
+        cond_pert = condition.clone()
+        cond_pert[:, 0] = 1.0 - condition[:, 0]
+
+        # 用扰动条件做一次 forward
+        with torch.set_grad_enabled(self.generator.training):
+            pred_pert = self.generator(input_data, cond_pert)
+
+        # 计算每个样本的输出均值差异
+        pred_mean = pred.view(B, -1).mean(dim=1)
+        pred_pert_mean = pred_pert.view(B, -1).mean(dim=1)
+        output_diff = pred_mean - pred_pert_mean  # (B,)
+
+        # EI 差异方向
+        ei_diff = condition[:, 0] - cond_pert[:, 0]  # (B,)
+
+        # 方向一致性：EI 更高 → 输出应更暗（归一化值更低）→ output_diff < 0
+        # 即 sign(ei_diff) 和 sign(output_diff) 应该相反
+        # Loss = ReLU( sign(ei_diff) * output_diff )
+        loss = torch.relu(ei_diff.sign() * output_diff)
+        return loss.mean()
     
     def train_epoch(self, train_loader: 'DataLoader') -> Dict[str, float]:
-        """训练一个 epoch（CICI-FiLM 条件化版本）"""
+        """训练一个 epoch（CICI-FiLM 条件化版本 + 方案 C/A）"""
         self.generator.train()
         if self.discriminator:
             self.discriminator.train()
 
-        epoch_losses = {'reconstruction': 0, 'perceptual': 0, 'total': 0}
+        epoch_losses = {
+            'reconstruction': 0, 'perceptual': 0, 'total': 0,
+            'ei': 0, 'contrast': 0,
+        }
 
         for batch_idx, batch in enumerate(train_loader):
             input_data = batch['input'].to(self.device)
@@ -158,44 +248,47 @@ class Trainer:
 
             # 生成器前向传播（传递条件向量）
             if self.use_condition and condition is not None:
-                # ConditionedGenerator 需要 condition 参数
                 pred = self.generator(input_data, condition)
             else:
-                # 普通生成器（Exp-0 baseline）
                 pred = self.generator(input_data)
 
             # GAN 训练：先更新判别器，再更新生成器
             if self.discriminator:
                 # ========== 步骤 1: 更新判别器 ==========
                 self.d_optimizer.zero_grad()
-
-                # 判别器对真实样本的预测
                 real_pred = self.discriminator(target)
-                # 判别器对生成样本的预测（detach 防止梯度传回生成器）
                 fake_pred = self.discriminator(pred.detach())
-
-                # 计算判别器损失并更新
                 d_losses = self.criterion.discriminator_loss(real_pred, fake_pred)
                 d_losses['total'].backward()
                 self.d_optimizer.step()
 
                 # ========== 步骤 2: 更新生成器 ==========
                 self.g_optimizer.zero_grad()
-
-                # 重新计算判别器对生成样本的预测（判别器权重已更新）
-                # 这次不 detach，让梯度传回生成器
                 disc_pred_for_g = self.discriminator(pred)
-
-                # 计算生成器损失
                 g_losses = self.criterion.generator_loss(pred, target, mask, disc_pred_for_g)
-                g_losses['total'].backward()
-                self.g_optimizer.step()
             else:
-                # 非 GAN 模式：只更新生成器
                 self.g_optimizer.zero_grad()
                 g_losses = self.criterion.generator_loss(pred, target, mask)
-                g_losses['total'].backward()
-                self.g_optimizer.step()
+
+            # ---- 方案 C：EI Loss ----
+            ei_loss = torch.tensor(0.0, device=self.device)
+            if self.lambda_ei > 0 and condition is not None:
+                soft_ei = self._compute_soft_ei(pred)  # (B,)
+                ei_target = condition[:, 0]  # c₁ = global_EI / 100
+                import torch.nn.functional as _F
+                ei_loss = _F.mse_loss(soft_ei, ei_target)
+                g_losses['ei'] = ei_loss
+                g_losses['total'] = g_losses['total'] + self.lambda_ei * ei_loss
+
+            # ---- 方案 A：条件响应损失 ----
+            contrast_loss = torch.tensor(0.0, device=self.device)
+            if self.lambda_contrast > 0 and self.use_condition and condition is not None:
+                contrast_loss = self._compute_contrast_loss(pred, input_data, condition)
+                g_losses['contrast'] = contrast_loss
+                g_losses['total'] = g_losses['total'] + self.lambda_contrast * contrast_loss
+
+            g_losses['total'].backward()
+            self.g_optimizer.step()
 
             # 累计损失
             for key in epoch_losses:
@@ -210,10 +303,10 @@ class Trainer:
         return epoch_losses
     
     def validate(self, val_loader: 'DataLoader') -> Dict[str, float]:
-        """验证（CICI-FiLM 条件化版本）"""
+        """验证（CICI-FiLM 条件化版本 + 方案 C/A）"""
         self.generator.eval()
 
-        val_losses = {'reconstruction': 0, 'total': 0}
+        val_losses = {'reconstruction': 0, 'total': 0, 'ei': 0, 'contrast': 0}
 
         with torch.no_grad():
             for batch in val_loader:
@@ -221,12 +314,10 @@ class Trainer:
                 target = batch['target'].to(self.device)
                 mask = batch['mask'].to(self.device)
 
-                # 获取条件向量（CICI-FiLM 阶段②）
                 condition = batch.get('condition', None)
                 if condition is not None:
                     condition = condition.to(self.device)
 
-                # 生成器前向传播（传递条件向量）
                 if self.use_condition and condition is not None:
                     pred = self.generator(input_data, condition)
                 else:
@@ -234,14 +325,37 @@ class Trainer:
 
                 losses = self.criterion.generator_loss(pred, target, mask)
 
+                # ---- 方案 C：EI Loss ----
+                if self.lambda_ei > 0 and condition is not None:
+                    soft_ei = self._compute_soft_ei(pred)
+                    ei_target = condition[:, 0]
+                    import torch.nn.functional as _F
+                    ei_loss = _F.mse_loss(soft_ei, ei_target)
+                    losses['ei'] = ei_loss
+                    losses['total'] = losses['total'] + self.lambda_ei * ei_loss
+
+                # ---- 方案 A：条件响应损失（验证时仅记录，不反向传播）----
+                if self.lambda_contrast > 0 and self.use_condition and condition is not None:
+                    cond_pert = condition.clone()
+                    cond_pert[:, 0] = 1.0 - condition[:, 0]
+                    pred_pert = self.generator(input_data, cond_pert)
+                    B = condition.shape[0]
+                    pred_mean = pred.view(B, -1).mean(dim=1)
+                    pred_pert_mean = pred_pert.view(B, -1).mean(dim=1)
+                    output_diff = pred_mean - pred_pert_mean
+                    ei_diff = condition[:, 0] - cond_pert[:, 0]
+                    contrast_loss = torch.relu(ei_diff.sign() * output_diff).mean()
+                    losses['contrast'] = contrast_loss
+                    losses['total'] = losses['total'] + self.lambda_contrast * contrast_loss
+
                 for key in val_losses:
                     if key in losses:
                         val_losses[key] += losses[key].item()
-        
+
         num_batches = len(val_loader)
         for key in val_losses:
             val_losses[key] /= num_batches
-        
+
         return val_losses
     
     def train(
@@ -264,10 +378,16 @@ class Trainer:
             # 训练
             train_losses = self.train_epoch(train_loader)
             self.history['train_loss'].append(train_losses['total'])
+            self.history['train_recon_loss'].append(train_losses.get('reconstruction', 0))
+            self.history['train_ei_loss'].append(train_losses.get('ei', 0))
+            self.history['train_contrast_loss'].append(train_losses.get('contrast', 0))
 
             # 验证
             val_losses = self.validate(val_loader)
             self.history['val_loss'].append(val_losses['total'])
+            self.history['val_recon_loss'].append(val_losses.get('reconstruction', 0))
+            self.history['val_ei_loss'].append(val_losses.get('ei', 0))
+            self.history['val_contrast_loss'].append(val_losses.get('contrast', 0))
 
             # 更新学习率
             current_lr = self.g_optimizer.param_groups[0]['lr']
@@ -279,14 +399,18 @@ class Trainer:
                 self.writer.add_scalar('Loss/val', val_losses['total'], self.current_epoch)
                 self.writer.add_scalar('Loss/reconstruction', train_losses.get('reconstruction', 0), self.current_epoch)
                 self.writer.add_scalar('Loss/perceptual', train_losses.get('perceptual', 0), self.current_epoch)
+                self.writer.add_scalar('Loss/ei', train_losses.get('ei', 0), self.current_epoch)
+                self.writer.add_scalar('Loss/contrast', train_losses.get('contrast', 0), self.current_epoch)
                 self.writer.add_scalar('LearningRate', current_lr, self.current_epoch)
 
             # 日志
+            ei_str = f" | EI: {train_losses.get('ei', 0):.6f}/{val_losses.get('ei', 0):.6f}" if self.lambda_ei > 0 else ""
+            ctr_str = f" | Ctr: {train_losses.get('contrast', 0):.6f}/{val_losses.get('contrast', 0):.6f}" if self.lambda_contrast > 0 else ""
             logger.info(
                 f"Epoch {self.current_epoch}/{epochs} | "
                 f"Train: {train_losses['total']:.4f} | "
                 f"Val: {val_losses['total']:.4f} | "
-                f"LR: {current_lr:.6f}"
+                f"LR: {current_lr:.6f}{ei_str}{ctr_str}"
             )
 
             # 保存最佳模型

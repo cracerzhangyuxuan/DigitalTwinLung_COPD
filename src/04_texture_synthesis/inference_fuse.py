@@ -259,6 +259,8 @@ def fuse_lesion(
     model_condition: Optional['torch.Tensor'] = None,
     mask_dilation: int = 0,
     atlas_lung_mask_path: Optional[Union[str, Path]] = None,
+    use_adaptive_hu_calibration: bool = False,
+    adaptive_mask_dilation: bool = False,
 ) -> Path:
     """
     将病灶融合到模板中
@@ -474,24 +476,48 @@ def fuse_lesion(
 
         return np.clip(matched, -1024, 400)
 
-    # 1. 定义病灶区域 (根据 mask)
-    # 【方案D】自适应 Lesion Mask 膨胀（仅用于 HU 校准，不改变 inpainting 区域）
-    calibration_mask = lesion_mask.copy()
+    # 1. 定义病灶区域（仅用于 HU 校准，不改变 inpainting 区域）
+    calibration_mask = lesion_mask.copy().astype(np.float32)
+    atlas_lung = None
+    if atlas_lung_mask_path is not None:
+        atlas_lung = (load_nifti(atlas_lung_mask_path) > 0).astype(np.float32)
+
     if mask_dilation > 0:
         try:
             from scipy.ndimage import binary_dilation
-            calibration_mask = binary_dilation(
-                calibration_mask > 0, iterations=mask_dilation
-            ).astype(np.float32)
-            if atlas_lung_mask_path is not None:
-                atlas_lung = load_nifti(atlas_lung_mask_path) > 0
-                calibration_mask = ((calibration_mask > 0) & atlas_lung).astype(np.float32)
-            orig_v = int((lesion_mask > 0).sum())
-            dil_v  = int((calibration_mask > 0).sum())
-            logger.info(
-                f"[方案D] Lesion mask 膨胀 {mask_dilation} 次: "
-                f"{orig_v} → {dil_v} 体素 (×{dil_v / max(orig_v, 1):.1f})"
-            )
+
+            base_mask = lesion_mask > 0
+            if adaptive_mask_dilation and patient_condition is not None and atlas_lung is not None:
+                lung_voxels = int(atlas_lung.sum())
+                target_ei = float(patient_condition.get('global_EI', 0.0)) / 100.0
+                target_voxels = int(round(target_ei * lung_voxels))
+                best_mask = base_mask.astype(np.float32)
+                best_iter = 0
+                best_gap = abs(int(base_mask.sum()) - target_voxels)
+                for i in range(1, mask_dilation + 1):
+                    cand = binary_dilation(base_mask, iterations=i)
+                    cand = cand & (atlas_lung > 0)
+                    cand_voxels = int(cand.sum())
+                    cand_gap = abs(cand_voxels - target_voxels)
+                    if cand_gap < best_gap:
+                        best_gap = cand_gap
+                        best_iter = i
+                        best_mask = cand.astype(np.float32)
+                calibration_mask = best_mask
+                logger.info(
+                    f"[方案D-自适应] 目标EI={target_ei * 100:.2f}%, 目标体素={target_voxels}, "
+                    f"选择膨胀 {best_iter} 次, 体素={int((calibration_mask > 0).sum())}"
+                )
+            else:
+                calibration_mask = binary_dilation(base_mask, iterations=mask_dilation).astype(np.float32)
+                if atlas_lung is not None:
+                    calibration_mask = ((calibration_mask > 0) & (atlas_lung > 0)).astype(np.float32)
+                orig_v = int(base_mask.sum())
+                dil_v = int((calibration_mask > 0).sum())
+                logger.info(
+                    f"[方案D] Lesion mask 膨胀 {mask_dilation} 次: "
+                    f"{orig_v} → {dil_v} 体素 (×{dil_v / max(orig_v, 1):.1f})"
+                )
         except ImportError:
             logger.warning("[方案D] scipy 未安装，跳过 mask 膨胀")
 
@@ -500,41 +526,22 @@ def fuse_lesion(
     # 2. 仅对病灶区域进行直方图校准
     if np.sum(lesion_indices) > 0:
         lesion_pixels = output_hu[lesion_indices]
-
-        # ============================================================
-        # 【CICI-FiLM 阶段①】自适应 HU 校准
-        # ============================================================
-        # 根据 patient_condition 动态设置 target_stats
-        # - Exp-0 (Baseline): patient_condition=None，使用固定先验值
-        # - Exp-1 (自适应校准): patient_condition 包含患者真实 c₃/c₄
-        if patient_condition is not None:
-            # 从患者真实病灶统计中提取目标值
+        if use_adaptive_hu_calibration and patient_condition is not None:
             target_stats = {
                 'mean': patient_condition.get('lesion_HU_mean', -965.0),
-                'std': patient_condition.get('lesion_HU_std', 45.0)
+                'std': patient_condition.get('lesion_HU_std', 45.0),
             }
             logger.info(
                 f"[CICI-FiLM Exp-1] 自适应 HU 校准: "
-                f"mean={target_stats['mean']:.1f} HU, "
-                f"std={target_stats['std']:.1f} HU"
+                f"mean={target_stats['mean']:.1f} HU, std={target_stats['std']:.1f} HU"
             )
         else:
-            # 回退到固定先验值（Exp-0 baseline）
-            target_stats = {
-                'mean': -965.0,  # 目标均值：让它比阈值(-950)更黑
-                'std': 45.0      # 目标对比度：增加标准差以提升 GLCM Contrast
-            }
+            target_stats = {'mean': -965.0, 'std': 45.0}
             logger.info(
                 f"[Exp-0 Baseline] 固定 HU 校准: "
-                f"mean={target_stats['mean']:.1f} HU, "
-                f"std={target_stats['std']:.1f} HU"
+                f"mean={target_stats['mean']:.1f} HU, std={target_stats['std']:.1f} HU"
             )
-        # ============================================================
-
-        # 执行校准
         calibrated_pixels = match_histogram_stats(lesion_pixels, target_stats)
-
-        # 赋值回原图
         output_hu[lesion_indices] = calibrated_pixels
 
     # ============================================================
