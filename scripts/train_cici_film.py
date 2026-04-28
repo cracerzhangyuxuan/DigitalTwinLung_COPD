@@ -30,8 +30,9 @@ from src.utils.logger import get_logger
 
 create_model = importlib.import_module('src.04_texture_synthesis.network').create_model
 ConditionedGenerator = importlib.import_module('src.04_texture_synthesis.conditioned_model').ConditionedGenerator
-create_dataloader = importlib.import_module('src.04_texture_synthesis.dataset').create_dataloader
+LungPatchDataset = importlib.import_module('src.04_texture_synthesis.dataset').LungPatchDataset
 Trainer = importlib.import_module('src.04_texture_synthesis.train').Trainer
+from torch.utils.data import DataLoader
 
 logger = get_logger(__name__)
 
@@ -39,14 +40,16 @@ logger = get_logger(__name__)
 def main():
     parser = argparse.ArgumentParser(description='CICI-FiLM 训练（阶段②）')
     parser.add_argument('--backbone-checkpoint', required=True, help='预训练 backbone 检查点')
-    parser.add_argument('--ct-dir', required=True, help='COPD CT 目录')
-    parser.add_argument('--mask-dir', required=True, help='病灶 mask 目录')
+    parser.add_argument('--mapped-dir', required=True, help='已配准数据目录 (data/03_mapped)')
     parser.add_argument('--patient-features', required=True, help='患者特征 JSON')
     parser.add_argument('--output-dir', required=True, help='输出目录')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--batch-size', type=int, default=4, help='批大小')
     parser.add_argument('--lr', type=float, default=0.0001, help='学习率')
     parser.add_argument('--device', default='cuda', help='设备')
+    parser.add_argument('--lambda-ei', type=float, default=0.0, help='方案C: EI 感知 Loss 权重')
+    parser.add_argument('--lambda-contrast', type=float, default=0.0, help='方案A: 条件响应 Loss 权重')
+    parser.add_argument('--ei-temperature', type=float, default=10.0, help='方案C: soft EI sigmoid 温度')
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -71,20 +74,40 @@ def main():
     model.freeze_backbone()  # 冻结主干，只训练 FiLM 分支
     logger.info("✓ 条件化生成器创建完成")
     
-    # 3. 创建数据加载器
+    # 3. 创建数据加载器（从 mapped_dir 扫描子目录）
     logger.info("\n" + "=" * 60)
     logger.info("步骤 3: 创建数据加载器")
     logger.info("=" * 60)
-    
-    train_loader, val_loader = create_dataloader(
-        ct_dir=args.ct_dir,
-        mask_dir=args.mask_dir,
-        batch_size=args.batch_size,
-        patient_features_path=args.patient_features,
-        use_condition=True  # 启用条件向量
+
+    mapped_dir = Path(args.mapped_dir)
+    TRAIN_CUTOFF = "copd_024"
+    train_ct, train_mask, val_ct, val_mask = [], [], [], []
+    for patient_dir in sorted(mapped_dir.iterdir()):
+        if not patient_dir.is_dir() or patient_dir.name == 'visualizations':
+            continue
+        warped_ct = patient_dir / f"{patient_dir.name}_warped.nii.gz"
+        warped_mask = patient_dir / f"{patient_dir.name}_warped_lesion.nii.gz"
+        if warped_ct.exists() and warped_mask.exists():
+            if patient_dir.name < TRAIN_CUTOFF:
+                train_ct.append(warped_ct); train_mask.append(warped_mask)
+            else:
+                val_ct.append(warped_ct); val_mask.append(warped_mask)
+    if not val_ct:
+        val_ct, val_mask = train_ct[-1:], train_mask[-1:]
+    logger.info(f"  训练集: {len(train_ct)} 例, 验证集: {len(val_ct)} 例")
+
+    train_dataset = LungPatchDataset(
+        ct_paths=train_ct, mask_paths=train_mask, patch_size=(64, 64, 64),
+        augment=True, patient_features_path=args.patient_features, use_condition=True
     )
-    logger.info(f"✓ 训练集: {len(train_loader.dataset)} patches")
-    logger.info(f"✓ 验证集: {len(val_loader.dataset)} patches")
+    val_dataset = LungPatchDataset(
+        ct_paths=val_ct, mask_paths=val_mask, patch_size=(64, 64, 64),
+        augment=False, patient_features_path=args.patient_features, use_condition=True
+    )
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    logger.info(f"✓ 训练集: {len(train_dataset)} patches")
+    logger.info(f"✓ 验证集: {len(val_dataset)} patches")
     
     # 4. 创建训练器
     logger.info("\n" + "=" * 60)
@@ -105,7 +128,10 @@ def main():
                 'adversarial': 0.01,
                 'hu_constraint': 0.5
             },
-            'enable_hu_constraint': True
+            'enable_hu_constraint': True,
+            'lambda_ei': args.lambda_ei,
+            'lambda_contrast': args.lambda_contrast,
+            'ei_temperature': args.ei_temperature,
         }
     }
     
