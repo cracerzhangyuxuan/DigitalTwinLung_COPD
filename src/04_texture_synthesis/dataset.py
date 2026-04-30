@@ -8,6 +8,7 @@
 
 from pathlib import Path
 from typing import Tuple, List, Optional, Union, Dict
+from functools import lru_cache
 
 import numpy as np
 
@@ -22,6 +23,21 @@ from ..utils.io import load_nifti
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _load_nifti_cached(path_str: str) -> np.ndarray:
+    """带缓存的 NIfTI 加载，避免同一体积被重复读取磁盘
+
+    缓存策略：LRU 缓存最多 64 个体积（CT + mask 各算一个）
+    29 例患者 × 2 文件 = 58 个，64 足够覆盖全部训练+验证数据
+    首次加载后全部驻留内存，后续 epoch 零磁盘 IO
+    """
+    return load_nifti(path_str).copy()  # copy 确保缓存数据不被意外修改
+
+
+# 使用模块级 lru_cache 装饰（不能直接装饰因为 np.ndarray 不可哈希作为参数，
+# 但 path_str 是字符串，可以作为 key）
+_load_nifti_cached = lru_cache(maxsize=64)(_load_nifti_cached)
 
 
 class LungPatchDataset(Dataset):
@@ -101,11 +117,11 @@ class LungPatchDataset(Dataset):
     def _generate_patch_indices(self) -> List[Tuple[int, Tuple[int, int, int]]]:
         """生成有效的 patch 索引"""
         indices = []
-        
+
         for vol_idx, (ct_path, mask_path) in enumerate(zip(self.ct_paths, self.mask_paths)):
             try:
-                ct = load_nifti(ct_path)
-                mask = load_nifti(mask_path)
+                ct = _load_nifti_cached(str(ct_path))
+                mask = _load_nifti_cached(str(mask_path))
                 
                 # 在 mask 区域内采样
                 valid_positions = self._find_valid_positions(ct, mask)
@@ -305,9 +321,9 @@ class LungPatchDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, 'torch.Tensor']:
         vol_idx, center = self.patch_indices[idx]
 
-        # 加载 COPD CT 和 mask
-        ct = load_nifti(self.ct_paths[vol_idx])
-        mask = load_nifti(self.mask_paths[vol_idx])
+        # 从缓存加载 CT 和 mask（避免每个 patch 重复读取磁盘）
+        ct = _load_nifti_cached(str(self.ct_paths[vol_idx]))
+        mask = _load_nifti_cached(str(self.mask_paths[vol_idx]))
 
         # 提取 patch
         ct_patch = self._extract_patch(ct, center)

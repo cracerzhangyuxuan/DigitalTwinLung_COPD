@@ -43,14 +43,14 @@ def main():
     parser.add_argument('--mapped-dir', required=True, help='已配准数据目录 (data/03_mapped)')
     parser.add_argument('--patient-features', required=True, help='患者特征 JSON')
     parser.add_argument('--output-dir', required=True, help='输出目录')
-    parser.add_argument('--epochs', type=int, default=200, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=80, help='训练轮数')
     parser.add_argument('--batch-size', type=int, default=4, help='批大小')
-    parser.add_argument('--lr', type=float, default=1e-5, help='学习率 (FiLM 分支建议 1e-5)')
+    parser.add_argument('--lr', type=float, default=2e-5, help='学习率 (FiLM 分支)')
     parser.add_argument('--device', default='cuda', help='设备')
     parser.add_argument('--lambda-ei', type=float, default=0.5, help='方案C: EI 感知 Loss 权重')
     parser.add_argument('--lambda-contrast', type=float, default=0.1, help='方案A: 条件响应 Loss 权重')
     parser.add_argument('--ei-temperature', type=float, default=10.0, help='方案C: soft EI sigmoid 温度')
-    parser.add_argument('--patience', type=int, default=30, help='Early stopping 耐心值')
+    parser.add_argument('--patience', type=int, default=15, help='Early stopping 耐心值')
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -61,7 +61,7 @@ def main():
     logger.info("步骤 1: 加载预训练 backbone")
     logger.info("=" * 60)
     
-    backbone, discriminator = create_model('patchgan')
+    backbone, _ = create_model('patchgan')  # FiLM 微调不使用判别器
     checkpoint = torch.load(args.backbone_checkpoint, map_location=device)
     backbone.load_state_dict(checkpoint['generator_state_dict'])
     logger.info(f"✓ 加载 backbone: {args.backbone_checkpoint}")
@@ -85,7 +85,7 @@ def main():
     logger.info("=" * 60)
 
     mapped_dir = Path(args.mapped_dir)
-    TRAIN_CUTOFF = "copd_024"
+    VAL_IDS = {"copd_024", "copd_025", "copd_026", "copd_027", "copd_028", "copd_029"}
     train_ct, train_mask, val_ct, val_mask = [], [], [], []
     for patient_dir in sorted(mapped_dir.iterdir()):
         if not patient_dir.is_dir() or patient_dir.name == 'visualizations':
@@ -93,10 +93,12 @@ def main():
         warped_ct = patient_dir / f"{patient_dir.name}_warped.nii.gz"
         warped_mask = patient_dir / f"{patient_dir.name}_warped_lesion.nii.gz"
         if warped_ct.exists() and warped_mask.exists():
-            if patient_dir.name < TRAIN_CUTOFF:
-                train_ct.append(warped_ct); train_mask.append(warped_mask)
-            else:
+            if patient_dir.name in VAL_IDS:
+                # copd_024~029 仅作为验证集
                 val_ct.append(warped_ct); val_mask.append(warped_mask)
+            else:
+                # copd_001~023 作为训练集
+                train_ct.append(warped_ct); train_mask.append(warped_mask)
     if not val_ct:
         val_ct, val_mask = train_ct[-1:], train_mask[-1:]
     logger.info(f"  训练集: {len(train_ct)} 例, 验证集: {len(val_ct)} 例")
@@ -125,12 +127,12 @@ def main():
             'learning_rate': args.lr,
             'beta1': 0.5,
             'beta2': 0.999,
-            'lr_scheduler': 'cosine',
+            'lr_scheduler': 'warmup_cosine',  # FiLM 零初始化需要 warmup
             'warmup_epochs': 5,
             'loss_weights': {
                 'reconstruction': 1.0,
                 'perceptual': 0.1,
-                'adversarial': 0.01,
+                'adversarial': 0.0,  # 无判别器，显式置零
                 'hu_constraint': 0.5
             },
             'enable_hu_constraint': True,
@@ -140,12 +142,13 @@ def main():
         }
     }
     
+    # FiLM 微调阶段不使用判别器：仅 2,434 可训练参数，对抗训练易导致不稳定
     trainer = Trainer(
         generator=model,
-        discriminator=discriminator,
+        discriminator=None,
         config=config,
         device=args.device,
-        use_condition=True  # 启用条件化训练
+        use_condition=True
     )
     logger.info("✓ 训练器创建完成")
     

@@ -442,18 +442,14 @@ def fuse_lesion(
     #       强制拉伸到与真实 COPD 一致的水平
     # ============================================================
 
-    def match_histogram_stats(source, reference_stats, adaptive=False):
+    def match_histogram_stats(source, reference_stats):
         """
         直方图统计匹配 (Calibration)
         将 source(AI) 的统计分布校准到 reference(Real) 的水平
 
-        adaptive=True 时使用保守插值策略:
-          - mean: 仅 30% 权重向患者真实值靠拢，70% 保留固定先验
-          - std:  完整校准（对 EI 匹配贡献最大）
-          - 跳过 Gamma 压暗（避免叠加偏移）
+        Exp-0: reference_stats = {'mean': -965.0, 'std': 45.0} (固定先验)
+        Exp-1: reference_stats = {'mean': 患者真实值, 'std': 患者真实值} (全量自适应)
         """
-        FIXED_MEAN = -965.0  # Exp-0 固定先验
-
         # 1. 计算 AI 当前的统计值
         src_mean = np.mean(source)
         src_std = np.std(source)
@@ -462,24 +458,16 @@ def fuse_lesion(
         ref_mean = reference_stats.get('mean', -970.0)
         ref_std = reference_stats.get('std', 40.0)
 
-        # 3. 自适应模式：保守插值 mean，完整校准 std
-        if adaptive:
-            alpha = 0.3  # mean 插值权重：30% 患者真实值 + 70% 固定先验
-            target_mean = FIXED_MEAN * (1 - alpha) + ref_mean * alpha
-        else:
-            target_mean = ref_mean
-
-        # 4. 线性变换: Z-score 匹配
+        # 3. 线性变换: Z-score 匹配
         scale = ref_std / (src_std + 1e-6)
         scale = np.clip(scale, 0.5, 2.0)
 
-        matched = (source - src_mean) * scale + target_mean
+        matched = (source - src_mean) * scale + ref_mean
 
-        # 5. Gamma 压暗：仅在非自适应模式下执行
-        if not adaptive:
-            mask_gray = (matched > -960) & (matched < -800)
-            if np.any(mask_gray):
-                matched[mask_gray] -= 20.0
+        # 4. Gamma 压暗
+        mask_gray = (matched > -960) & (matched < -800)
+        if np.any(mask_gray):
+            matched[mask_gray] -= 20.0
 
         return np.clip(matched, -1024, 400)
 
@@ -533,17 +521,14 @@ def fuse_lesion(
     # 2. 仅对病灶区域进行直方图校准
     if np.sum(lesion_indices) > 0:
         lesion_pixels = output_hu[lesion_indices]
-        is_adaptive = use_adaptive_hu_calibration and patient_condition is not None
-        if is_adaptive:
+        if use_adaptive_hu_calibration and patient_condition is not None:
             target_stats = {
                 'mean': patient_condition.get('lesion_HU_mean', -965.0),
                 'std': patient_condition.get('lesion_HU_std', 45.0),
             }
             logger.info(
-                f"[CICI-FiLM Exp-1] 自适应 HU 校准 (保守插值): "
-                f"patient_mean={target_stats['mean']:.1f} HU, "
-                f"patient_std={target_stats['std']:.1f} HU, "
-                f"alpha=0.3"
+                f"[CICI-FiLM Exp-1] 自适应 HU 校准 (全量): "
+                f"mean={target_stats['mean']:.1f} HU, std={target_stats['std']:.1f} HU"
             )
         else:
             target_stats = {'mean': -965.0, 'std': 45.0}
@@ -551,9 +536,7 @@ def fuse_lesion(
                 f"[Exp-0 Baseline] 固定 HU 校准: "
                 f"mean={target_stats['mean']:.1f} HU, std={target_stats['std']:.1f} HU"
             )
-        calibrated_pixels = match_histogram_stats(
-            lesion_pixels, target_stats, adaptive=is_adaptive
-        )
+        calibrated_pixels = match_histogram_stats(lesion_pixels, target_stats)
         output_hu[lesion_indices] = calibrated_pixels
 
     # ============================================================
