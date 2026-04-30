@@ -119,7 +119,7 @@ def main():
             logger.error(f'{args.mode} 模式需要 --backbone-checkpoint')
             return
         model, _ = create_model('patchgan')
-        checkpoint = torch.load(args.backbone_checkpoint, map_location=device)
+        checkpoint = torch.load(args.backbone_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['generator_state_dict'])
         logger.info(f'✓ 加载 backbone: {args.backbone_checkpoint}')
         if args.mode == 'exp1':
@@ -137,7 +137,7 @@ def main():
             return
         backbone, _ = create_model('patchgan')
         model = ConditionedGenerator(backbone, cond_dim=5, cond_emb_dim=64)
-        checkpoint = torch.load(args.film_checkpoint, map_location=device)
+        checkpoint = torch.load(args.film_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['generator_state_dict'])
         logger.info(f'✓ 加载 CICI-FiLM: {args.film_checkpoint}')
         cond_vec, model_condition_tensor = _build_condition_tensor(patient_condition, patient_features)
