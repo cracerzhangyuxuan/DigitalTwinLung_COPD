@@ -155,6 +155,7 @@ def main():
         model_condition=model_condition_tensor,
         mask_dilation=args.mask_dilation,
         atlas_lung_mask_path=args.atlas_lung_mask,
+        use_adaptive_hu_calibration=(patient_condition_for_calibration is not None),
     )
     logger.info(f'\n✓ 推理完成: {output_path}')
 

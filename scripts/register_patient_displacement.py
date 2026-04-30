@@ -4,7 +4,14 @@
 任意患者呼吸双相标签配准 & 位移场生成 & 3D可视化
 
 用法:
-  python scripts/register_patient_displacement.py --patient-dir data/K096 --patient-id K096 [--fast]
+  # 单个患者
+  python scripts/register_patient_displacement.py --patient-id K096
+  # 批量处理所有患者
+  python scripts/register_patient_displacement.py
+  # 自定义输入/输出目录
+  python scripts/register_patient_displacement.py --input-root data/sample --output-root results/displacement_results
+  # 快速模式
+  python scripts/register_patient_displacement.py --patient-id K096 --fast
 """
 import sys, time, shutil, argparse
 import numpy as np
@@ -153,29 +160,74 @@ def plot_3d_displacement(insp_path: Path, warp_path: Path, output_dir: Path, pat
     print(f'      位移统计: mean={lung_disp.mean():.2f} mm, p95={np.percentile(lung_disp,95):.2f} mm, max={lung_disp.max():.2f} mm')
 
 
+def process_one_patient(patient_id: str, patient_dir: Path, output_dir: Path, fast: bool, skip_reg: bool) -> str:
+    """处理单个患者，返回 'success' / 'skipped' / 'failed'。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print('=' * 60)
+    print(f'[患者] {patient_id}')
+    print(f'  输出目录: {output_dir}')
+    try:
+        insp_path, exp_path = _find_phase_files(patient_dir)
+    except FileNotFoundError as e:
+        print(f'  [SKIP] {e}')
+        return 'skipped'
+    print(f'  吸气相: {insp_path.name}')
+    print(f'  呼气相: {exp_path.name}')
+    print(f'  度量函数: Mattes Mutual Information (适合标签数据)')
+    print('=' * 60)
+    try:
+        warp_path = output_dir / 'syn_1Warp.nii.gz'
+        if skip_reg:
+            if not warp_path.exists():
+                raise FileNotFoundError(f'--skip-reg 但形变场不存在: {warp_path}')
+            print('[1/3] 跳过配准')
+        else:
+            _, warp_path = run_registration(insp_path, exp_path, output_dir, fast=fast)
+        plot_triview(insp_path, exp_path, output_dir)
+        plot_3d_displacement(insp_path, warp_path, output_dir, patient_id)
+        print(f'  [OK] {patient_id} 完成')
+        for f in sorted(output_dir.glob('*')):
+            print(f'    {f.name}  ({f.stat().st_size/1024/1024:.1f} MB)')
+        return 'success'
+    except Exception as e:
+        print(f'  [FAIL] {patient_id} 失败: {e}')
+        return 'failed'
+
+
 def main():
+    default_input = str(PROJECT_ROOT / 'data' / 'sample')
+    default_output = str(PROJECT_ROOT / 'results' / 'displacement_results')
     parser = argparse.ArgumentParser(description='任意患者吸呼气标签配准 & 位移场 & 3D可视化')
-    parser.add_argument('--patient-dir', required=True, help='患者目录，如 data/K096')
-    parser.add_argument('--patient-id', required=True, help='患者ID，如 K096')
+    parser.add_argument('--input-root', default=default_input, help=f'输入根目录 (默认: {default_input})')
+    parser.add_argument('--output-root', default=default_output, help=f'输出根目录 (默认: {default_output})')
+    parser.add_argument('--patient-id', default=None, help='指定单个患者ID；不指定则批量处理所有患者')
     parser.add_argument('--fast', action='store_true', help='快速模式')
     parser.add_argument('--skip-reg', action='store_true', help='跳过配准，复用已有形变场')
     args = parser.parse_args()
-    patient_dir = PROJECT_ROOT / args.patient_dir if not Path(args.patient_dir).is_absolute() else Path(args.patient_dir)
-    insp_path, exp_path = _find_phase_files(patient_dir)
-    output_dir = PROJECT_ROOT / 'results' / f'displacement_{args.patient_id}'
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print('=' * 60); print(f'  {args.patient_id} 标签配准 & 位移场可视化'); print('  度量函数: Mattes Mutual Information (适合标签数据)'); print('=' * 60)
-    print(f'  吸气相: {insp_path.name}'); print(f'  呼气相: {exp_path.name}'); print(f'  输出:   {output_dir}'); print('=' * 60)
-    warp_path = output_dir / 'syn_1Warp.nii.gz'
-    if args.skip_reg:
-        if not warp_path.exists(): raise FileNotFoundError(f'--skip-reg 但形变场不存在: {warp_path}')
-        print('[1/3] 跳过配准')
+    input_root = Path(args.input_root) if Path(args.input_root).is_absolute() else PROJECT_ROOT / args.input_root
+    output_root = Path(args.output_root) if Path(args.output_root).is_absolute() else PROJECT_ROOT / args.output_root
+    if args.patient_id:
+        patient_dirs = [(args.patient_id, input_root / args.patient_id)]
     else:
-        _, warp_path = run_registration(insp_path, exp_path, output_dir, fast=args.fast)
-    plot_triview(insp_path, exp_path, output_dir)
-    plot_3d_displacement(insp_path, warp_path, output_dir, args.patient_id)
-    print('\n' + '=' * 60); print('  全部完成！输出文件:')
-    for f in sorted(output_dir.glob('*')): print(f'    {f.name}  ({f.stat().st_size/1024/1024:.1f} MB)')
+        patient_dirs = sorted([(d.name, d) for d in input_root.iterdir() if d.is_dir()])
+    print('=' * 60)
+    print('  呼吸双相标签配准、位移场生成与可视化')
+    print('=' * 60)
+    print(f'  输入根目录: {input_root}')
+    print(f'  输出根目录: {output_root}')
+    print(f'  待处理患者数: {len(patient_dirs)}')
+    print('=' * 60)
+    results = {'success': 0, 'skipped': 0, 'failed': 0}
+    for pid, pdir in patient_dirs:
+        if not pdir.exists():
+            print(f'[SKIP] 患者目录不存在: {pdir}')
+            results['skipped'] += 1
+            continue
+        status = process_one_patient(pid, pdir, output_root / pid, fast=args.fast, skip_reg=args.skip_reg)
+        results[status] += 1
+    print('\n' + '=' * 60)
+    print(f'完成: success={results["success"]}, skipped={results["skipped"]}, failed={results["failed"]}')
+    print(f'输出根目录: {output_root}')
     print('=' * 60)
 
 

@@ -414,24 +414,40 @@ def convert_lesion_and_lung_to_stl(
 # 命令行入口
 # =============================================================================
 
-def find_lesion_mask(patient_id: str) -> Optional[str]:
-    """查找患者的病灶掩膜文件"""
+def normalize_patient_id(patient_id: str) -> str:
+    """规范化患者 ID，允许输入 024 或 copd_024。"""
+    patient_id = patient_id.strip()
+    return patient_id if patient_id.startswith("copd_") else f"copd_{patient_id}"
+
+
+def parse_patient_ids(patient_text: str) -> list:
+    """解析逗号分隔的患者 ID 列表。"""
+    return [normalize_patient_id(pid) for pid in patient_text.split(',') if pid.strip()]
+
+
+def find_lesion_mask(patient_id: str, lesion_root: Optional[Path] = None) -> Optional[str]:
+    """查找患者的病灶掩膜文件。"""
     base_dir = Path(__file__).parent.parent
-    mask_path = base_dir / "data" / "03_mapped" / patient_id / f"{patient_id}_warped_lesion.nii.gz"
+    lesion_root = lesion_root or (base_dir / "data" / "03_mapped")
+    patient_id = normalize_patient_id(patient_id)
+    mask_path = lesion_root / patient_id / f"{patient_id}_warped_lesion.nii.gz"
     return str(mask_path) if mask_path.exists() else None
 
 
-def find_lung_mask() -> Optional[str]:
-    """查找肺部掩膜文件"""
+def find_lung_mask(lung_mask_path: Optional[str] = None) -> Optional[str]:
+    """查找肺部掩膜文件。"""
+    if lung_mask_path:
+        mask_path = Path(lung_mask_path)
+        return str(mask_path) if mask_path.exists() else None
     base_dir = Path(__file__).parent.parent
     mask_path = base_dir / "data" / "02_atlas" / "standard_mask.nii.gz"
     return str(mask_path) if mask_path.exists() else None
 
 
-def get_all_patients() -> list:
-    """获取所有可用的患者 ID"""
+def get_all_patients(lesion_root: Optional[Path] = None) -> list:
+    """获取所有可用的患者 ID。"""
     base_dir = Path(__file__).parent.parent
-    mapped_dir = base_dir / "data" / "03_mapped"
+    mapped_dir = lesion_root or (base_dir / "data" / "03_mapped")
     patients = []
     if mapped_dir.exists():
         for subdir in mapped_dir.iterdir():
@@ -452,11 +468,8 @@ def main():
   # 导出单个患者（病灶+肺部）
   python export_lesion_stl.py --patient copd_001
 
-  # 仅导出病灶区域
-  python export_lesion_stl.py --patient copd_001 --lesion-only
-
-  # 仅导出正常肺部区域
-  python export_lesion_stl.py --patient copd_001 --lung-only
+  # 批量导出指定患者
+  python export_lesion_stl.py --patients copd_024,copd_025,copd_026,copd_027,copd_028,copd_029
 
   # 导出所有患者
   python export_lesion_stl.py --all
@@ -467,9 +480,15 @@ def main():
     )
 
     parser.add_argument('--patient', type=str, default=None,
-                        help='患者 ID (如 copd_001)')
+                        help='单个患者 ID (如 copd_024 或 024)')
+    parser.add_argument('--patients', type=str, default=None,
+                        help='批量患者 ID，逗号分隔，如 copd_024,copd_025')
     parser.add_argument('--all', action='store_true',
-                        help='导出所有患者')
+                        help='导出 lesion-root 下所有患者')
+    parser.add_argument('--lesion-root', type=str, default='data/03_mapped',
+                        help='病灶掩膜根目录 (默认: data/03_mapped)')
+    parser.add_argument('--lung-mask', type=str, default=None,
+                        help='肺部掩膜路径 (默认: data/02_atlas/standard_mask.nii.gz)')
     parser.add_argument('--input', type=str, default=None,
                         help='输入病灶掩膜文件路径（仅导出病灶）')
     parser.add_argument('--output', type=str, default=None,
@@ -485,72 +504,70 @@ def main():
 
     args = parser.parse_args()
 
-    # 确定输出目录
     base_dir = Path(__file__).parent.parent
+    lesion_root = Path(args.lesion_root)
+    if not lesion_root.is_absolute():
+        lesion_root = base_dir / lesion_root
+
     output_dir = base_dir / "data" / "05_stl_export"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 确定导出模式
     export_lesion = not args.lung_only
     export_lung = not args.lesion_only
 
-    # 获取肺部掩膜路径
-    lung_mask_path = find_lung_mask()
+    lung_mask_path = find_lung_mask(args.lung_mask)
     if export_lung and not lung_mask_path:
-        print("错误: 未找到肺部掩膜文件 (data/02_atlas/standard_mask.nii.gz)")
+        print("错误: 未找到肺部掩膜文件")
         sys.exit(1)
 
-    # 处理不同的输入模式
     if args.input:
-        # 指定输入文件模式（仅病灶）
         if not Path(args.input).exists():
             print(f"错误: 输入文件不存在: {args.input}")
             sys.exit(1)
         output_path = args.output or str(output_dir / "custom_lesion.stl")
         convert_lesion_to_stl(args.input, output_path, args.level, args.step_size)
+        return
 
+    if args.patients:
+        patients = parse_patient_ids(args.patients)
     elif args.all:
-        # 导出所有患者
-        patients = get_all_patients()
-        if not patients:
-            print("错误: 未找到任何患者数据")
-            sys.exit(1)
-
-        print(f"找到 {len(patients)} 个患者: {patients}")
-
-        for patient_id in patients:
-            print(f"\n{'='*60}")
-            print(f"处理患者: {patient_id}")
-            lesion_path = find_lesion_mask(patient_id)
-            if lesion_path:
-                lesion_output = str(output_dir / f"{patient_id}_lesion.stl")
-                lung_output = str(output_dir / f"{patient_id}_lung.stl")
-                try:
-                    convert_lesion_and_lung_to_stl(
-                        lesion_path, lung_mask_path, lesion_output, lung_output,
-                        args.level, args.step_size, export_lesion, export_lung
-                    )
-                except Exception as e:
-                    print(f"  ✗ 导出失败: {e}")
-            else:
-                print(f"  ✗ 未找到病灶掩膜文件")
-
+        patients = get_all_patients(lesion_root)
     else:
-        # 单个患者模式
-        patient_id = args.patient or "copd_001"
-        lesion_path = find_lesion_mask(patient_id)
+        patients = [normalize_patient_id(args.patient or "copd_001")]
 
+    if not patients:
+        print("错误: 未找到任何可处理患者")
+        sys.exit(1)
+
+    print(f"病灶掩膜根目录: {lesion_root}")
+    print(f"输出目录: {output_dir}")
+    print(f"待处理患者数: {len(patients)}")
+
+    success = skipped = failed = 0
+    for patient_id in patients:
+        print(f"\n{'=' * 60}")
+        print(f"处理患者: {patient_id}")
+        lesion_path = find_lesion_mask(patient_id, lesion_root)
+        expected_path = lesion_root / patient_id / f"{patient_id}_warped_lesion.nii.gz"
         if not lesion_path:
-            print(f"错误: 未找到患者 {patient_id} 的病灶掩膜文件")
-            sys.exit(1)
+            print(f"  [SKIP] 未找到病灶掩膜文件: {expected_path}")
+            skipped += 1
+            continue
 
         lesion_output = args.output or str(output_dir / f"{patient_id}_lesion.stl")
         lung_output = str(output_dir / f"{patient_id}_lung.stl")
+        try:
+            convert_lesion_and_lung_to_stl(
+                lesion_path, lung_mask_path, lesion_output, lung_output,
+                args.level, args.step_size, export_lesion, export_lung
+            )
+            success += 1
+        except Exception as e:
+            print(f"  [FAIL] 导出失败: {e}")
+            failed += 1
 
-        convert_lesion_and_lung_to_stl(
-            lesion_path, lung_mask_path, lesion_output, lung_output,
-            args.level, args.step_size, export_lesion, export_lung
-        )
+    print(f"\n完成: success={success}, skipped={skipped}, failed={failed}")
+
 
 
 if __name__ == "__main__":
