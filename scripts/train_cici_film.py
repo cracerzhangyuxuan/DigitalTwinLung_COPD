@@ -62,7 +62,7 @@ def main():
     logger.info("=" * 60)
     
     backbone, _ = create_model('patchgan')  # FiLM 微调不使用判别器
-    checkpoint = torch.load(args.backbone_checkpoint, map_location=device)
+    checkpoint = torch.load(args.backbone_checkpoint, map_location=device, weights_only=False)
     backbone.load_state_dict(checkpoint['generator_state_dict'])
     logger.info(f"✓ 加载 backbone: {args.backbone_checkpoint}")
     

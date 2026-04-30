@@ -520,8 +520,8 @@ class Trainer:
 
         try:
             torch.save(checkpoint, temp_path)
-            # 验证文件可读
-            torch.load(temp_path, map_location='cpu')
+            # 验证文件可读（weights_only=False 因为 checkpoint 含 numpy 标量和 history）
+            torch.load(temp_path, map_location='cpu', weights_only=False)
             # 重命名为目标文件
             if path.exists():
                 path.unlink()
@@ -533,7 +533,7 @@ class Trainer:
     
     def load_checkpoint(self, path: Union[str, Path]) -> None:
         """加载检查点"""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         self.generator.load_state_dict(checkpoint['generator_state_dict'])
         self.g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
