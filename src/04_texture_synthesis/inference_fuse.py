@@ -442,37 +442,44 @@ def fuse_lesion(
     #       强制拉伸到与真实 COPD 一致的水平
     # ============================================================
 
-    def match_histogram_stats(source, reference_stats):
+    def match_histogram_stats(source, reference_stats, adaptive=False):
         """
         直方图统计匹配 (Calibration)
-        将 source(AI) 的统计分布强制拉伸到 reference(Real) 的水平
+        将 source(AI) 的统计分布校准到 reference(Real) 的水平
+
+        adaptive=True 时使用保守插值策略:
+          - mean: 仅 30% 权重向患者真实值靠拢，70% 保留固定先验
+          - std:  完整校准（对 EI 匹配贡献最大）
+          - 跳过 Gamma 压暗（避免叠加偏移）
         """
+        FIXED_MEAN = -965.0  # Exp-0 固定先验
+
         # 1. 计算 AI 当前的统计值
         src_mean = np.mean(source)
         src_std = np.std(source)
 
-        # 2. 获取目标统计值 (根据真实 COPD 数据经验值设定)
-        # 真实肺气肿区域通常均值在 -960 到 -980 之间，标准差较大
+        # 2. 获取目标统计值
         ref_mean = reference_stats.get('mean', -970.0)
         ref_std = reference_stats.get('std', 40.0)
 
-        # 3. 线性变换: Z-score 匹配
-        # (x - mu_src) / std_src = (y - mu_ref) / std_ref
-        # y = (x - mu_src) * (std_ref / std_src) + mu_ref
+        # 3. 自适应模式：保守插值 mean，完整校准 std
+        if adaptive:
+            alpha = 0.3  # mean 插值权重：30% 患者真实值 + 70% 固定先验
+            target_mean = FIXED_MEAN * (1 - alpha) + ref_mean * alpha
+        else:
+            target_mean = ref_mean
 
-        # 为了避免放大噪声，我们限制放大倍数
+        # 4. 线性变换: Z-score 匹配
         scale = ref_std / (src_std + 1e-6)
-        scale = np.clip(scale, 0.5, 2.0)  # 限制缩放范围
+        scale = np.clip(scale, 0.5, 2.0)
 
-        matched = (source - src_mean) * scale + ref_mean
+        matched = (source - src_mean) * scale + target_mean
 
-        # 4. 关键修正：非线性 Gamma 压暗
-        # 如果像素仍然太亮，施加额外的 Gamma 校正
-        # 将 [-960, -800] 区间强力压暗
-        mask_gray = (matched > -960) & (matched < -800)
-        if np.any(mask_gray):
-            # 越接近 -800，压暗力度越大
-            matched[mask_gray] -= 20.0
+        # 5. Gamma 压暗：仅在非自适应模式下执行
+        if not adaptive:
+            mask_gray = (matched > -960) & (matched < -800)
+            if np.any(mask_gray):
+                matched[mask_gray] -= 20.0
 
         return np.clip(matched, -1024, 400)
 
@@ -526,14 +533,17 @@ def fuse_lesion(
     # 2. 仅对病灶区域进行直方图校准
     if np.sum(lesion_indices) > 0:
         lesion_pixels = output_hu[lesion_indices]
-        if use_adaptive_hu_calibration and patient_condition is not None:
+        is_adaptive = use_adaptive_hu_calibration and patient_condition is not None
+        if is_adaptive:
             target_stats = {
                 'mean': patient_condition.get('lesion_HU_mean', -965.0),
                 'std': patient_condition.get('lesion_HU_std', 45.0),
             }
             logger.info(
-                f"[CICI-FiLM Exp-1] 自适应 HU 校准: "
-                f"mean={target_stats['mean']:.1f} HU, std={target_stats['std']:.1f} HU"
+                f"[CICI-FiLM Exp-1] 自适应 HU 校准 (保守插值): "
+                f"patient_mean={target_stats['mean']:.1f} HU, "
+                f"patient_std={target_stats['std']:.1f} HU, "
+                f"alpha=0.3"
             )
         else:
             target_stats = {'mean': -965.0, 'std': 45.0}
@@ -541,7 +551,9 @@ def fuse_lesion(
                 f"[Exp-0 Baseline] 固定 HU 校准: "
                 f"mean={target_stats['mean']:.1f} HU, std={target_stats['std']:.1f} HU"
             )
-        calibrated_pixels = match_histogram_stats(lesion_pixels, target_stats)
+        calibrated_pixels = match_histogram_stats(
+            lesion_pixels, target_stats, adaptive=is_adaptive
+        )
         output_hu[lesion_indices] = calibrated_pixels
 
     # ============================================================

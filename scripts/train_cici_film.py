@@ -43,13 +43,14 @@ def main():
     parser.add_argument('--mapped-dir', required=True, help='已配准数据目录 (data/03_mapped)')
     parser.add_argument('--patient-features', required=True, help='患者特征 JSON')
     parser.add_argument('--output-dir', required=True, help='输出目录')
-    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=200, help='训练轮数')
     parser.add_argument('--batch-size', type=int, default=4, help='批大小')
-    parser.add_argument('--lr', type=float, default=0.0001, help='学习率')
+    parser.add_argument('--lr', type=float, default=1e-5, help='学习率 (FiLM 分支建议 1e-5)')
     parser.add_argument('--device', default='cuda', help='设备')
-    parser.add_argument('--lambda-ei', type=float, default=0.0, help='方案C: EI 感知 Loss 权重')
-    parser.add_argument('--lambda-contrast', type=float, default=0.0, help='方案A: 条件响应 Loss 权重')
+    parser.add_argument('--lambda-ei', type=float, default=0.5, help='方案C: EI 感知 Loss 权重')
+    parser.add_argument('--lambda-contrast', type=float, default=0.1, help='方案A: 条件响应 Loss 权重')
     parser.add_argument('--ei-temperature', type=float, default=10.0, help='方案C: soft EI sigmoid 温度')
+    parser.add_argument('--patience', type=int, default=30, help='Early stopping 耐心值')
     args = parser.parse_args()
     
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
@@ -72,7 +73,11 @@ def main():
     
     model = ConditionedGenerator(backbone, cond_dim=5, cond_emb_dim=64)
     model.freeze_backbone()  # 冻结主干，只训练 FiLM 分支
-    logger.info("✓ 条件化生成器创建完成")
+    # 确认可训练参数
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    logger.info(f"✓ 条件化生成器创建完成")
+    logger.info(f"  可训练参数: {trainable:,} | 冻结参数: {frozen:,}")
     
     # 3. 创建数据加载器（从 mapped_dir 扫描子目录）
     logger.info("\n" + "=" * 60)
@@ -157,7 +162,8 @@ def main():
         val_loader=val_loader,
         epochs=args.epochs,
         checkpoint_dir=output_dir,
-        save_frequency=10
+        save_frequency=10,
+        patience=args.patience
     )
     
     logger.info("\n" + "=" * 60)

@@ -358,19 +358,48 @@ class Trainer:
 
         return val_losses
     
+    @staticmethod
+    def _compute_psnr_ssim(pred, target, mask):
+        """计算 patch 级 PSNR 和 SSIM（仅 mask 区域）"""
+        import numpy as np
+        p = pred.detach().cpu().numpy().flatten()
+        t = target.detach().cpu().numpy().flatten()
+        m = mask.detach().cpu().numpy().flatten() > 0
+        if m.sum() == 0:
+            return 0.0, 0.0
+        p_m, t_m = p[m], t[m]
+        mse = float(np.mean((p_m - t_m) ** 2))
+        psnr = 10.0 * np.log10(1.0 / (mse + 1e-10))
+        # 简化 SSIM（全局统计）
+        mu_p, mu_t = p_m.mean(), t_m.mean()
+        sig_p, sig_t = p_m.std(), t_m.std()
+        sig_pt = np.mean((p_m - mu_p) * (t_m - mu_t))
+        c1, c2 = 0.01 ** 2, 0.03 ** 2
+        ssim = float(((2 * mu_p * mu_t + c1) * (2 * sig_pt + c2)) /
+                      ((mu_p ** 2 + mu_t ** 2 + c1) * (sig_p ** 2 + sig_t ** 2 + c2)))
+        return psnr, ssim
+
     def train(
         self,
         train_loader: 'DataLoader',
         val_loader: 'DataLoader',
         epochs: int = 100,
         checkpoint_dir: Union[str, Path] = "checkpoints",
-        save_frequency: int = 10
+        save_frequency: int = 10,
+        patience: int = 0
     ) -> Dict:
-        """完整训练流程"""
+        """完整训练流程
+
+        Args:
+            patience: Early stopping 耐心值。0 表示不启用。
+        """
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"开始训练: {epochs} epochs")
+        logger.info(f"开始训练: {epochs} epochs" +
+                    (f", early stopping patience={patience}" if patience > 0 else ""))
+
+        no_improve_count = 0
 
         for epoch in range(epochs):
             self.current_epoch = epoch + 1
@@ -382,12 +411,38 @@ class Trainer:
             self.history['train_ei_loss'].append(train_losses.get('ei', 0))
             self.history['train_contrast_loss'].append(train_losses.get('contrast', 0))
 
-            # 验证
+            # 验证（含 PSNR/SSIM）
             val_losses = self.validate(val_loader)
             self.history['val_loss'].append(val_losses['total'])
             self.history['val_recon_loss'].append(val_losses.get('reconstruction', 0))
             self.history['val_ei_loss'].append(val_losses.get('ei', 0))
             self.history['val_contrast_loss'].append(val_losses.get('contrast', 0))
+
+            # 计算验证集 PSNR/SSIM
+            epoch_psnr, epoch_ssim, n_val = 0.0, 0.0, 0
+            self.generator.eval()
+            with torch.no_grad():
+                for batch in val_loader:
+                    inp = batch['input'].to(self.device)
+                    tgt = batch['target'].to(self.device)
+                    msk = batch['mask'].to(self.device)
+                    cond = batch.get('condition', None)
+                    if cond is not None:
+                        cond = cond.to(self.device)
+                    if self.use_condition and cond is not None:
+                        pred = self.generator(inp, cond)
+                    else:
+                        pred = self.generator(inp)
+                    for i in range(pred.shape[0]):
+                        p, s = self._compute_psnr_ssim(pred[i], tgt[i], msk[i])
+                        epoch_psnr += p
+                        epoch_ssim += s
+                        n_val += 1
+            if n_val > 0:
+                epoch_psnr /= n_val
+                epoch_ssim /= n_val
+            self.history['psnr'].append(epoch_psnr)
+            self.history['ssim'].append(epoch_ssim)
 
             # 更新学习率
             current_lr = self.g_optimizer.param_groups[0]['lr']
@@ -402,6 +457,8 @@ class Trainer:
                 self.writer.add_scalar('Loss/ei', train_losses.get('ei', 0), self.current_epoch)
                 self.writer.add_scalar('Loss/contrast', train_losses.get('contrast', 0), self.current_epoch)
                 self.writer.add_scalar('LearningRate', current_lr, self.current_epoch)
+                self.writer.add_scalar('Metrics/PSNR', epoch_psnr, self.current_epoch)
+                self.writer.add_scalar('Metrics/SSIM', epoch_ssim, self.current_epoch)
 
             # 日志
             ei_str = f" | EI: {train_losses.get('ei', 0):.6f}/{val_losses.get('ei', 0):.6f}" if self.lambda_ei > 0 else ""
@@ -410,6 +467,7 @@ class Trainer:
                 f"Epoch {self.current_epoch}/{epochs} | "
                 f"Train: {train_losses['total']:.4f} | "
                 f"Val: {val_losses['total']:.4f} | "
+                f"PSNR: {epoch_psnr:.2f} | SSIM: {epoch_ssim:.4f} | "
                 f"LR: {current_lr:.6f}{ei_str}{ctr_str}"
             )
 
@@ -418,10 +476,18 @@ class Trainer:
                 self.best_loss = val_losses['total']
                 self.save_checkpoint(checkpoint_dir / "best.pth")
                 logger.info(f"  ✓ 保存最佳模型: loss = {self.best_loss:.4f}")
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
 
             # 定期保存
             if self.current_epoch % save_frequency == 0:
                 self.save_checkpoint(checkpoint_dir / "latest.pth")
+
+            # Early stopping
+            if patience > 0 and no_improve_count >= patience:
+                logger.info(f"Early stopping: {patience} epochs 无改善，停止训练")
+                break
 
         # 关闭 TensorBoard
         if self.writer:
