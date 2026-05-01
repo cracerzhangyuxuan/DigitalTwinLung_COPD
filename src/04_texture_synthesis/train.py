@@ -79,6 +79,18 @@ class Trainer:
             logger.info(f"[方案C] EI Loss: λ={self.lambda_ei}, τ={self.ei_temperature}")
         if self.lambda_contrast > 0:
             logger.info(f"[方案A] 条件响应 Loss: λ={self.lambda_contrast}")
+
+        # ---- v2: HU Statistics Loss ----
+        self.lambda_hu_stats = float(train_config.get('lambda_hu_stats', 0.0))
+        self.condition_losses = None
+        if self.lambda_hu_stats > 0:
+            from .condition_losses import ConditionLosses
+            self.condition_losses = ConditionLosses(
+                lambda_hu_stats=self.lambda_hu_stats,
+                lambda_ei=0.0,  # EI loss 由 Trainer 自身处理
+                lambda_histogram=0.0,
+            )
+            logger.info(f"[v2] HU Statistics Loss: λ={self.lambda_hu_stats}")
         self.epochs = train_config.get('epochs', 100)
 
         # 优化器（CICI-FiLM 阶段②：只训练 FiLM 分支）
@@ -233,7 +245,7 @@ class Trainer:
 
         epoch_losses = {
             'reconstruction': 0, 'perceptual': 0, 'total': 0,
-            'ei': 0, 'contrast': 0,
+            'ei': 0, 'contrast': 0, 'hu_stats': 0,
         }
 
         for batch_idx, batch in enumerate(train_loader):
@@ -287,6 +299,13 @@ class Trainer:
                 g_losses['contrast'] = contrast_loss
                 g_losses['total'] = g_losses['total'] + self.lambda_contrast * contrast_loss
 
+            # ---- v2: HU Statistics Loss ----
+            if self.condition_losses is not None and condition is not None:
+                cond_losses = self.condition_losses(pred, target, mask, condition)
+                if 'hu_stats' in cond_losses:
+                    g_losses['hu_stats'] = cond_losses['hu_stats']
+                    g_losses['total'] = g_losses['total'] + cond_losses['condition_total']
+
             g_losses['total'].backward()
             self.g_optimizer.step()
 
@@ -303,10 +322,10 @@ class Trainer:
         return epoch_losses
     
     def validate(self, val_loader: 'DataLoader') -> Dict[str, float]:
-        """验证（CICI-FiLM 条件化版本 + 方案 C/A）"""
+        """验证（CICI-FiLM 条件化版本 + 方案 C/A + v2）"""
         self.generator.eval()
 
-        val_losses = {'reconstruction': 0, 'total': 0, 'ei': 0, 'contrast': 0}
+        val_losses = {'reconstruction': 0, 'total': 0, 'ei': 0, 'contrast': 0, 'hu_stats': 0}
 
         with torch.no_grad():
             for batch in val_loader:
@@ -347,6 +366,13 @@ class Trainer:
                     contrast_loss = torch.relu(ei_diff.sign() * output_diff).mean()
                     losses['contrast'] = contrast_loss
                     losses['total'] = losses['total'] + self.lambda_contrast * contrast_loss
+
+                # ---- v2: HU Statistics Loss ----
+                if self.condition_losses is not None and condition is not None:
+                    cond_losses = self.condition_losses(pred, target, mask, condition)
+                    if 'hu_stats' in cond_losses:
+                        losses['hu_stats'] = cond_losses['hu_stats']
+                        losses['total'] = losses['total'] + cond_losses['condition_total']
 
                 for key in val_losses:
                     if key in losses:
@@ -456,6 +482,7 @@ class Trainer:
                 self.writer.add_scalar('Loss/perceptual', train_losses.get('perceptual', 0), self.current_epoch)
                 self.writer.add_scalar('Loss/ei', train_losses.get('ei', 0), self.current_epoch)
                 self.writer.add_scalar('Loss/contrast', train_losses.get('contrast', 0), self.current_epoch)
+                self.writer.add_scalar('Loss/hu_stats', train_losses.get('hu_stats', 0), self.current_epoch)
                 self.writer.add_scalar('LearningRate', current_lr, self.current_epoch)
                 self.writer.add_scalar('Metrics/PSNR', epoch_psnr, self.current_epoch)
                 self.writer.add_scalar('Metrics/SSIM', epoch_ssim, self.current_epoch)
@@ -463,12 +490,13 @@ class Trainer:
             # 日志
             ei_str = f" | EI: {train_losses.get('ei', 0):.6f}/{val_losses.get('ei', 0):.6f}" if self.lambda_ei > 0 else ""
             ctr_str = f" | Ctr: {train_losses.get('contrast', 0):.6f}/{val_losses.get('contrast', 0):.6f}" if self.lambda_contrast > 0 else ""
+            hu_str = f" | HU: {train_losses.get('hu_stats', 0):.6f}/{val_losses.get('hu_stats', 0):.6f}" if self.lambda_hu_stats > 0 else ""
             logger.info(
                 f"Epoch {self.current_epoch}/{epochs} | "
                 f"Train: {train_losses['total']:.4f} | "
                 f"Val: {val_losses['total']:.4f} | "
                 f"PSNR: {epoch_psnr:.2f} | SSIM: {epoch_ssim:.4f} | "
-                f"LR: {current_lr:.6f}{ei_str}{ctr_str}"
+                f"LR: {current_lr:.6f}{ei_str}{ctr_str}{hu_str}"
             )
 
             # 保存最佳模型
