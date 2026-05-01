@@ -95,8 +95,22 @@ def main():
         val_ct, val_mask = train_ct[-1:], train_mask[-1:]
     logger.info(f"  训练: {len(train_ct)} 例, 验证: {len(val_ct)} 例")
 
-    train_ds = LungPatchDataset(train_ct, train_mask, (64,64,64), True, args.patient_features, True)
-    val_ds = LungPatchDataset(val_ct, val_mask, (64,64,64), False, args.patient_features, True)
+    train_ds = LungPatchDataset(
+        train_ct, train_mask,
+        patch_size=(64,64,64),
+        patches_per_volume=50,
+        augment=True,
+        patient_features_path=args.patient_features,
+        use_condition=True
+    )
+    val_ds = LungPatchDataset(
+        val_ct, val_mask,
+        patch_size=(64,64,64),
+        patches_per_volume=50,
+        augment=False,
+        patient_features_path=args.patient_features,
+        use_condition=True
+    )
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
     logger.info(f"✓ 训练: {len(train_ds)} patches, 验证: {len(val_ds)} patches")
