@@ -73,10 +73,11 @@ def safe_stats_error(arr_a, arr_b, reducer):
     return abs(float(reducer(arr_a)) - float(reducer(arr_b)))
 
 
-def evaluate_one(exp_dir, pid, ref_ct_dir, ref_lung_dir, mapped_dir, atlas_lung_mask):
+def evaluate_one(exp_dir, pid, ref_ct_dir, ref_lung_dir, mapped_dir, atlas_lung_mask,
+                 ref_ct_suffix='_clean', ref_lung_suffix='_mask'):
     fused = load_nifti(find_fused(exp_dir, pid))
-    ref_native = load_nifti(ref_ct_dir / f'{pid}_clean.nii.gz')
-    ref_lung = load_nifti(ref_lung_dir / f'{pid}_mask.nii.gz') > 0
+    ref_native = load_nifti(ref_ct_dir / f'{pid}{ref_ct_suffix}.nii.gz')
+    ref_lung = load_nifti(ref_lung_dir / f'{pid}{ref_lung_suffix}.nii.gz') > 0
     warped_ref = load_nifti(mapped_dir / pid / f'{pid}_warped.nii.gz')
     lesion_mask = load_nifti(mapped_dir / pid / f'{pid}_warped_lesion.nii.gz') > 0
     atlas_lung = atlas_lung_mask > 0
@@ -118,7 +119,11 @@ def main():
     parser.add_argument('--exp1-dir', required=True)
     parser.add_argument('--exp2-dir', default=None, help='Exp-2 结果目录（可选）')
     parser.add_argument('--ref-ct-dir', required=True)
+    parser.add_argument('--ref-ct-suffix', default='_clean',
+                        help='参考 CT 文件后缀，默认 _clean（即 copd_024_clean.nii.gz）')
     parser.add_argument('--ref-lung-mask-dir', required=True)
+    parser.add_argument('--ref-lung-suffix', default='_mask',
+                        help='肺 mask 文件后缀，默认 _mask（即 copd_024_mask.nii.gz）')
     parser.add_argument('--mapped-dir', required=True)
     parser.add_argument('--atlas-lung-mask', default='data/02_atlas/standard_mask.nii.gz')
     parser.add_argument('--patients', nargs='+', default=[f'copd_{i:03d}' for i in range(24, 30)])
@@ -143,7 +148,10 @@ def main():
             print(f'  评估 {pid}...', end=' ', flush=True)
             try:
                 report[exp_name]['patients'][pid] = evaluate_one(
-                    exp_dir, pid, Path(args.ref_ct_dir), Path(args.ref_lung_mask_dir), Path(args.mapped_dir), atlas_lung_mask
+                    exp_dir, pid, Path(args.ref_ct_dir), Path(args.ref_lung_mask_dir),
+                    Path(args.mapped_dir), atlas_lung_mask,
+                    ref_ct_suffix=args.ref_ct_suffix,
+                    ref_lung_suffix=args.ref_lung_suffix,
                 )
                 print(f'✓')
             except Exception as e:
