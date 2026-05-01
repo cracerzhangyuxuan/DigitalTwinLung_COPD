@@ -46,6 +46,7 @@ from src.utils.logger import get_logger
 create_model = importlib.import_module('src.04_texture_synthesis.network').create_model
 ConditionedGenerator = importlib.import_module('src.04_texture_synthesis.conditioned_model').ConditionedGenerator
 ConditionedGeneratorV2 = importlib.import_module('src.04_texture_synthesis.conditioned_model_v2').ConditionedGeneratorV2
+ConditionedGeneratorV3 = importlib.import_module('src.04_texture_synthesis.conditioned_model_v3').ConditionedGeneratorV3
 fuse_lesion = importlib.import_module('src.04_texture_synthesis.inference_fuse').fuse_lesion
 
 
@@ -88,8 +89,8 @@ def main():
     parser.add_argument('--mode', required=True, choices=['exp0', 'exp1', 'exp2'])
     parser.add_argument('--backbone-checkpoint', help='预训练 backbone 检查点（exp0/exp1 用）')
     parser.add_argument('--film-checkpoint', help='CICI-FiLM 检查点（exp2 用）')
-    parser.add_argument('--film-version', choices=['v1', 'v2'], default='v1',
-                        help='CICI-FiLM 模型版本（v1=output-level，v2=multi-level hooks）')
+    parser.add_argument('--film-version', choices=['v1', 'v2', 'v3'], default='v1',
+                        help='CICI-FiLM 模型版本（v1=output-level，v2=multi-level hooks，v3=SPADE-based）')
 
     parser.add_argument('--template', required=True, help='健康 Atlas 模板')
     parser.add_argument('--mask', required=True, help='病灶 mask')
@@ -143,7 +144,10 @@ def main():
             logger.error('exp2 模式需要 --film-checkpoint')
             return
         backbone, _ = create_model('patchgan')
-        if args.film_version == 'v2':
+        if args.film_version == 'v3':
+            model = ConditionedGeneratorV3(backbone, cond_dim=5, cond_emb_dim=512)
+            logger.info('  使用 CICI-FiLM v3 架构（SPADE-based multi-scale）')
+        elif args.film_version == 'v2':
             model = ConditionedGeneratorV2(backbone, cond_dim=5, cond_emb_dim=256)
             logger.info('  使用 CICI-FiLM v2 架构（multi-level FiLM hooks）')
         else:

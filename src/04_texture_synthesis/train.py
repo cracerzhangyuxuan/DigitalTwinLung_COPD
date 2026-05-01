@@ -80,31 +80,53 @@ class Trainer:
         if self.lambda_contrast > 0:
             logger.info(f"[方案A] 条件响应 Loss: λ={self.lambda_contrast}")
 
-        # ---- v2: HU Statistics Loss ----
+        # ---- v2/v3: HU Statistics Loss ----
         self.lambda_hu_stats = float(train_config.get('lambda_hu_stats', 0.0))
+        self.use_v3_losses = train_config.get('use_v3_losses', False)
         self.condition_losses = None
-        if self.lambda_hu_stats > 0:
+
+        if self.use_v3_losses:
+            # v3: Wasserstein + Soft Histogram + HU Stats
+            from .condition_losses_v3 import ConditionLossesV3
+            self.condition_losses = ConditionLossesV3(
+                lambda_wasserstein=float(train_config.get('lambda_wasserstein', 1.0)),
+                lambda_hu_stats=self.lambda_hu_stats,
+                lambda_soft_histogram=float(train_config.get('lambda_soft_histogram', 0.3)),
+                lambda_ei=0.0,  # EI loss 由 Trainer 自身处理
+            )
+            logger.info(f"[v3] Wasserstein Loss: λ={train_config.get('lambda_wasserstein', 1.0)}")
+            logger.info(f"[v3] HU Statistics Loss: λ={self.lambda_hu_stats}")
+            logger.info(f"[v3] Soft Histogram Loss: λ={train_config.get('lambda_soft_histogram', 0.3)}")
+        elif self.lambda_hu_stats > 0:
+            # v2: 仅 HU Stats
             from .condition_losses import ConditionLosses
             self.condition_losses = ConditionLosses(
                 lambda_hu_stats=self.lambda_hu_stats,
-                lambda_ei=0.0,  # EI loss 由 Trainer 自身处理
+                lambda_ei=0.0,
                 lambda_histogram=0.0,
             )
             logger.info(f"[v2] HU Statistics Loss: λ={self.lambda_hu_stats}")
+
+        # v3: 梯度裁剪
+        self.gradient_clip_norm = train_config.get('gradient_clip_norm', 0.0)
+        if self.gradient_clip_norm > 0:
+            logger.info(f"[v3] Gradient Clipping: max_norm={self.gradient_clip_norm}")
+
         self.epochs = train_config.get('epochs', 100)
 
         # 优化器（CICI-FiLM 阶段②：只训练 FiLM 分支）
         lr = train_config.get('learning_rate', 0.0002)
         betas = (train_config.get('beta1', 0.5), train_config.get('beta2', 0.999))
+        weight_decay = train_config.get('weight_decay', 0.0)  # v3: weight decay
 
         if use_condition:
             # 只优化条件分支参数（cond_encoder + film）
             trainable_params = [p for p in self.generator.parameters() if p.requires_grad]
-            self.g_optimizer = Adam(trainable_params, lr=lr, betas=betas)
+            self.g_optimizer = Adam(trainable_params, lr=lr, betas=betas, weight_decay=weight_decay)
             logger.info(f"[CICI-FiLM] 仅训练条件分支: {sum(p.numel() for p in trainable_params):,} 参数")
         else:
             # 训练所有参数（Exp-0 baseline）
-            self.g_optimizer = Adam(self.generator.parameters(), lr=lr, betas=betas)
+            self.g_optimizer = Adam(self.generator.parameters(), lr=lr, betas=betas, weight_decay=weight_decay)
 
         if self.discriminator:
             self.d_optimizer = Adam(self.discriminator.parameters(), lr=lr, betas=betas)
@@ -307,6 +329,14 @@ class Trainer:
                     g_losses['total'] = g_losses['total'] + cond_losses['condition_total']
 
             g_losses['total'].backward()
+
+            # v3: 梯度裁剪
+            if self.gradient_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.generator.parameters(),
+                    self.gradient_clip_norm
+                )
+
             self.g_optimizer.step()
 
             # 累计损失
@@ -483,6 +513,10 @@ class Trainer:
                 self.writer.add_scalar('Loss/ei', train_losses.get('ei', 0), self.current_epoch)
                 self.writer.add_scalar('Loss/contrast', train_losses.get('contrast', 0), self.current_epoch)
                 self.writer.add_scalar('Loss/hu_stats', train_losses.get('hu_stats', 0), self.current_epoch)
+                # v3: 新增 Wasserstein 和 Soft Histogram
+                if self.use_v3_losses:
+                    self.writer.add_scalar('Loss/wasserstein', train_losses.get('wasserstein', 0), self.current_epoch)
+                    self.writer.add_scalar('Loss/soft_histogram', train_losses.get('soft_histogram', 0), self.current_epoch)
                 self.writer.add_scalar('LearningRate', current_lr, self.current_epoch)
                 self.writer.add_scalar('Metrics/PSNR', epoch_psnr, self.current_epoch)
                 self.writer.add_scalar('Metrics/SSIM', epoch_ssim, self.current_epoch)
@@ -490,13 +524,23 @@ class Trainer:
             # 日志
             ei_str = f" | EI: {train_losses.get('ei', 0):.6f}/{val_losses.get('ei', 0):.6f}" if self.lambda_ei > 0 else ""
             ctr_str = f" | Ctr: {train_losses.get('contrast', 0):.6f}/{val_losses.get('contrast', 0):.6f}" if self.lambda_contrast > 0 else ""
-            hu_str = f" | HU: {train_losses.get('hu_stats', 0):.6f}/{val_losses.get('hu_stats', 0):.6f}" if self.lambda_hu_stats > 0 else ""
+
+            # v3: 显示 Wasserstein + Soft Histogram + HU Stats
+            if self.use_v3_losses:
+                w1_str = f" | W1: {train_losses.get('wasserstein', 0):.6f}/{val_losses.get('wasserstein', 0):.6f}"
+                sh_str = f" | SH: {train_losses.get('soft_histogram', 0):.6f}/{val_losses.get('soft_histogram', 0):.6f}"
+                hu_str = f" | HU: {train_losses.get('hu_stats', 0):.6f}/{val_losses.get('hu_stats', 0):.6f}"
+                v3_str = w1_str + sh_str + hu_str
+            else:
+                hu_str = f" | HU: {train_losses.get('hu_stats', 0):.6f}/{val_losses.get('hu_stats', 0):.6f}" if self.lambda_hu_stats > 0 else ""
+                v3_str = hu_str
+
             logger.info(
                 f"Epoch {self.current_epoch}/{epochs} | "
                 f"Train: {train_losses['total']:.4f} | "
                 f"Val: {val_losses['total']:.4f} | "
                 f"PSNR: {epoch_psnr:.2f} | SSIM: {epoch_ssim:.4f} | "
-                f"LR: {current_lr:.6f}{ei_str}{ctr_str}{hu_str}"
+                f"LR: {current_lr:.6f}{ei_str}{ctr_str}{v3_str}"
             )
 
             # 保存最佳模型
