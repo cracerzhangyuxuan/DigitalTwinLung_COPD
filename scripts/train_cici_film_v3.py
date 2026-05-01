@@ -23,9 +23,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.logger import get_logger
-from src.04_texture_synthesis.conditioned_model_v3 import ConditionedGeneratorV3
-from src.04_texture_synthesis.dataset import LungPatchDataset
-from src.04_texture_synthesis.train import Trainer
+
+# 使用 importlib 避免模块名中的数字导致语法错误
+import importlib
+conditioned_model_v3 = importlib.import_module('src.04_texture_synthesis.conditioned_model_v3')
+dataset_module = importlib.import_module('src.04_texture_synthesis.dataset')
+train_module = importlib.import_module('src.04_texture_synthesis.train')
+network_module = importlib.import_module('src.04_texture_synthesis.network')
+
+ConditionedGeneratorV3 = conditioned_model_v3.ConditionedGeneratorV3
+LungPatchDataset = dataset_module.LungPatchDataset
+Trainer = train_module.Trainer
+create_model = network_module.create_model
 
 logger = get_logger(__name__)
 
@@ -63,7 +72,6 @@ def main():
 
     # 加载 backbone
     logger.info(f'加载 backbone: {args.backbone_checkpoint}')
-    from src.04_texture_synthesis.network import create_model
     backbone, _ = create_model('patchgan')
     checkpoint = torch.load(args.backbone_checkpoint, map_location=device, weights_only=False)
     backbone.load_state_dict(checkpoint['generator_state_dict'])

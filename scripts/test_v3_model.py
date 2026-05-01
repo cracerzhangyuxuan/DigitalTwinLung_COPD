@@ -11,8 +11,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
-from src.04_texture_synthesis.network import create_model
-from src.04_texture_synthesis.conditioned_model_v3 import ConditionedGeneratorV3
+import importlib
+
+# 使用 importlib 避免模块名中的数字导致语法错误
+network_module = importlib.import_module('src.04_texture_synthesis.network')
+conditioned_model_v3 = importlib.import_module('src.04_texture_synthesis.conditioned_model_v3')
+
+create_model = network_module.create_model
+ConditionedGeneratorV3 = conditioned_model_v3.ConditionedGeneratorV3
 
 def test_v3_model():
     print("=" * 60)
