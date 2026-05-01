@@ -155,11 +155,13 @@ def main():
     trainer = Trainer(
         generator=model,
         discriminator=None,
-        train_config=config['training'],
-        checkpoint_dir=output_dir,
+        config=config,  # 传递完整配置，而不是 train_config
         device=device,
         use_condition=True,
     )
+
+    # 设置 checkpoint 目录
+    trainer.checkpoint_dir = output_dir
 
     # 保存配置
     config_path = output_dir / 'config.json'
