@@ -75,8 +75,16 @@ def plot_slice_comparison(ref_ct, exp0_ct, exp1_ct, lesion_mask, z_slice, output
 
 def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient_id,
                       exp2_lesion=None, gold_stage=None):
-    """绘制病灶区 HU 密度分布直方图，支持 Exp-2。"""
-    fig, ax = plt.subplots(figsize=(14, 7), dpi=200)
+    """绘制病灶区 HU 密度分布直方图，支持 Exp-2。
+
+    使用固定 X 轴范围 (-1024, 0)，与 PatchGAN 评估图表 (chart_histogram_precal_vs_postcal)
+    保持一致，确保跨图表的 density 峰值和分布形态可直接对比。
+    """
+    fig = plt.figure(figsize=(16, 8), dpi=200)
+    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.12,
+                          left=0.06, right=0.97, top=0.90, bottom=0.10)
+    ax = fig.add_subplot(gs[0, 0])
+    ax_t = fig.add_subplot(gs[0, 1])
 
     draw_order = [
         ('Real COPD (Ref, warped)', ref_lesion,  '#27ae60'),
@@ -86,12 +94,8 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
     if exp2_lesion is not None:
         draw_order.append(('Exp-2 (CICI-FiLM v3)', exp2_lesion, '#E74C3C'))
 
-    # 动态 X 轴范围
-    all_flat = [d.flatten() for _, d, _ in draw_order]
-    combined = np.concatenate(all_flat)
-    p1, p99 = np.percentile(combined, [1, 99])
-    hist_lo = min(p1 - 20, -1050)
-    hist_hi = max(p99 + 20, -800)
+    # 固定 X 轴范围，与 PatchGAN 评估图表对齐
+    hist_lo, hist_hi = -1024, 0
 
     all_stats = {}
     for label, data, color in draw_order:
@@ -109,32 +113,36 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
     ax.axvline(-950, color='#2c3e50', linestyle='--', linewidth=2.0, alpha=0.85,
                label='Emphysema Threshold (−950 HU)')
 
-    y_max = ax.get_ylim()[1]
-    ax.set_ylim(0, y_max * (1.45 if exp2_lesion is not None else 1.38))
-
-    # 统计量文字框
-    stat_lines = ['HU Statistics\n' + '─' * 28]
-    for label, _, _ in draw_order:
-        s = all_stats[label]
-        stat_lines.append(
-            f'{label}\n'
-            f'  Mean: {s["mean"]:.1f} HU | Std: {s["std"]:.1f} HU | EI: {s["ei_pct"]:.1f}%'
-        )
-    ax.text(0.985, 0.975, '\n'.join(stat_lines), transform=ax.transAxes,
-            fontsize=10, va='top', ha='right', fontfamily='monospace',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white', edgecolor='#ccc', alpha=0.9))
-
     ax.set_xlim(hist_lo, hist_hi)
     ax.set_xlabel('HU Value', fontsize=14, fontweight='bold')
     ax.set_ylabel('Density', fontsize=14, fontweight='bold')
     ax.tick_params(labelsize=12)
-    ax.legend(loc='upper left', fontsize=10, framealpha=0.9)
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
 
     gold_str = f' | GOLD {gold_stage}' if gold_stage else ''
-    ax.set_title(f'{patient_id}{gold_str} — Lesion Region HU Distribution',
-                 fontsize=16, fontweight='bold')
+    ax.set_title(f'HU Distribution in 3D Lesion (Exp-0 / Exp-1 / Exp-2 / Real)',
+                 fontsize=15, fontweight='bold')
 
-    plt.tight_layout()
+    # 右侧统计面板
+    ax_t.axis('off')
+    stat_lines = ['HU Statistics', '=' * 36, '']
+    for label, _, _ in draw_order:
+        s = all_stats[label]
+        stat_lines.extend([
+            f'{label}:',
+            f'  Mean: {s["mean"]:.1f} HU',
+            f'  Std:  {s["std"]:.1f} HU',
+            f'  EI:   {s["ei_pct"]:.1f}%',
+            '',
+        ])
+    ax_t.text(0.02, 0.90, '\n'.join(stat_lines), transform=ax_t.transAxes,
+              fontsize=11, va='top', fontfamily='monospace', linespacing=1.3)
+
+    n_vox = len(ref_lesion.flatten())
+    fig.suptitle(f'{patient_id}{gold_str} — Lesion Region HU Distribution  [{n_vox:,} voxels]',
+                 fontsize=16, fontweight='bold', y=0.98)
+
     fig.savefig(output_path, bbox_inches='tight', facecolor='white', dpi=200)
     plt.close(fig)
 

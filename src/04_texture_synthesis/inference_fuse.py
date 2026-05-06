@@ -467,9 +467,30 @@ def fuse_lesion(
 
         matched = (source - src_mean) * scale + ref_mean
 
-        # 4. 软边界：clip 到 -1050（而非 -1024），避免在直方图可见范围
-        #    产生人工堆积尖峰。-1050 已远超正常肺实质范围（-1000 = 空气）
-        return np.clip(matched, -1050, 400)
+        # 4. 软边界压缩：使用 sigmoid 平滑压缩替代硬 clip
+        #    避免大量体素堆积在边界值产生人工尖峰
+        #    对 [-1024, 400] 范围内的体素不做改变，
+        #    仅对超出范围的体素进行平滑压缩
+        lo, hi = -1024.0, 400.0
+        margin = 30.0  # 在边界外 ±margin HU 范围内平滑过渡
+
+        # 下边界软压缩：将 < lo 的体素平滑压缩到 [lo-margin, lo] 区间
+        below = matched < lo
+        if np.any(below):
+            # 距离下界的偏移量（正值）
+            delta = lo - matched[below]
+            # sigmoid 压缩：delta → [0, margin)，越远离边界越趋近 margin
+            compressed = margin * (1.0 - np.exp(-delta / margin))
+            matched[below] = lo - compressed
+
+        # 上边界软压缩：将 > hi 的体素平滑压缩到 [hi, hi+margin] 区间
+        above = matched > hi
+        if np.any(above):
+            delta = matched[above] - hi
+            compressed = margin * (1.0 - np.exp(-delta / margin))
+            matched[above] = hi + compressed
+
+        return matched
 
     # 1. 定义病灶区域（仅用于 HU 校准，不改变 inpainting 区域）
     calibration_mask = lesion_mask.copy().astype(np.float32)
