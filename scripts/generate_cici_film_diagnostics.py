@@ -77,14 +77,10 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
                       exp2_lesion=None, gold_stage=None):
     """绘制病灶区 HU 密度分布直方图，支持 Exp-2。
 
-    使用固定 X 轴范围 (-1024, 0)，与 PatchGAN 评估图表 (chart_histogram_precal_vs_postcal)
-    保持一致，确保跨图表的 density 峰值和分布形态可直接对比。
+    单图布局，统计信息框嵌入主图右上空白区域。
+    X 轴范围 (-1100, 0)，覆盖软边界压缩后低于 -1024 的体素。
     """
-    fig = plt.figure(figsize=(16, 8), dpi=200)
-    gs = fig.add_gridspec(1, 2, width_ratios=[3, 1], wspace=0.12,
-                          left=0.06, right=0.97, top=0.90, bottom=0.10)
-    ax = fig.add_subplot(gs[0, 0])
-    ax_t = fig.add_subplot(gs[0, 1])
+    fig, ax = plt.subplots(figsize=(14, 7), dpi=200)
 
     draw_order = [
         ('Real COPD (Ref, warped)', ref_lesion,  '#27ae60'),
@@ -94,8 +90,8 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
     if exp2_lesion is not None:
         draw_order.append(('Exp-2 (CICI-FiLM v3)', exp2_lesion, '#E74C3C'))
 
-    # 固定 X 轴范围，与 PatchGAN 评估图表对齐
-    hist_lo, hist_hi = -1024, 0
+    # 固定 X 轴范围：覆盖软压缩后低于 -1024 的体素
+    hist_lo, hist_hi = -1100, 0
 
     all_stats = {}
     for label, data, color in draw_order:
@@ -117,32 +113,29 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
     ax.set_xlabel('HU Value', fontsize=14, fontweight='bold')
     ax.set_ylabel('Density', fontsize=14, fontweight='bold')
     ax.tick_params(labelsize=12)
-    ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax.legend(loc='upper left', fontsize=10, framealpha=0.9)
     ax.grid(True, alpha=0.3)
 
-    gold_str = f' | GOLD {gold_stage}' if gold_stage else ''
-    ax.set_title(f'HU Distribution in 3D Lesion (Exp-0 / Exp-1 / Exp-2 / Real)',
-                 fontsize=15, fontweight='bold')
-
-    # 右侧统计面板
-    ax_t.axis('off')
-    stat_lines = ['HU Statistics', '=' * 36, '']
+    # 统计信息框：嵌入主图内部右上空白区域
+    stat_lines = []
     for label, _, _ in draw_order:
         s = all_stats[label]
-        stat_lines.extend([
-            f'{label}:',
-            f'  Mean: {s["mean"]:.1f} HU',
-            f'  Std:  {s["std"]:.1f} HU',
-            f'  EI:   {s["ei_pct"]:.1f}%',
-            '',
-        ])
-    ax_t.text(0.02, 0.90, '\n'.join(stat_lines), transform=ax_t.transAxes,
-              fontsize=11, va='top', fontfamily='monospace', linespacing=1.3)
+        # 缩写标签以节省水平空间
+        short = label.split('(')[0].strip() if '(' in label else label
+        stat_lines.append(
+            f'{short}: μ={s["mean"]:.1f}  σ={s["std"]:.1f}  EI={s["ei_pct"]:.1f}%'
+        )
+    ax.text(0.98, 0.96, '\n'.join(stat_lines), transform=ax.transAxes,
+            fontsize=9, va='top', ha='right', fontfamily='monospace',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                      edgecolor='#bbb', alpha=0.88))
 
     n_vox = len(ref_lesion.flatten())
-    fig.suptitle(f'{patient_id}{gold_str} — Lesion Region HU Distribution  [{n_vox:,} voxels]',
-                 fontsize=16, fontweight='bold', y=0.98)
+    gold_str = f' | GOLD {gold_stage}' if gold_stage else ''
+    ax.set_title(f'{patient_id}{gold_str} — Lesion Region HU Distribution  [{n_vox:,} voxels]',
+                 fontsize=15, fontweight='bold')
 
+    plt.tight_layout()
     fig.savefig(output_path, bbox_inches='tight', facecolor='white', dpi=200)
     plt.close(fig)
 
