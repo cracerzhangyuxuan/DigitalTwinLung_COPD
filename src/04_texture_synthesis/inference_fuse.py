@@ -447,6 +447,8 @@ def fuse_lesion(
         直方图统计匹配 (Calibration)
         将 source(AI) 的统计分布校准到 reference(Real) 的水平
 
+        纯 z-score 匹配：y_cal = (y - μ_src) × (σ_ref / σ_src) + μ_ref
+
         Exp-0: reference_stats = {'mean': -965.0, 'std': 45.0} (固定先验)
         Exp-1: reference_stats = {'mean': 患者真实值, 'std': 患者真实值} (全量自适应)
         """
@@ -455,21 +457,19 @@ def fuse_lesion(
         src_std = np.std(source)
 
         # 2. 获取目标统计值
-        ref_mean = reference_stats.get('mean', -970.0)
-        ref_std = reference_stats.get('std', 40.0)
+        ref_mean = reference_stats.get('mean', -965.0)
+        ref_std = reference_stats.get('std', 45.0)
 
         # 3. 线性变换: Z-score 匹配
+        #    scale clip 放宽到 [0.3, 3.0]，避免真实 std 较小时被过度限制
         scale = ref_std / (src_std + 1e-6)
-        scale = np.clip(scale, 0.5, 2.0)
+        scale = np.clip(scale, 0.3, 3.0)
 
         matched = (source - src_mean) * scale + ref_mean
 
-        # 4. Gamma 压暗
-        mask_gray = (matched > -960) & (matched < -800)
-        if np.any(mask_gray):
-            matched[mask_gray] -= 20.0
-
-        return np.clip(matched, -1024, 400)
+        # 4. 软边界：clip 到 -1050（而非 -1024），避免在直方图可见范围
+        #    产生人工堆积尖峰。-1050 已远超正常肺实质范围（-1000 = 空气）
+        return np.clip(matched, -1050, 400)
 
     # 1. 定义病灶区域（仅用于 HU 校准，不改变 inpainting 区域）
     calibration_mask = lesion_mask.copy().astype(np.float32)
