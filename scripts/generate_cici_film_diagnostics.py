@@ -44,31 +44,78 @@ def find_center_slice(mask):
     return z_indices[len(z_indices) // 2] if len(z_indices) > 0 else mask.shape[2] // 2
 
 
-def plot_slice_comparison(ref_ct, exp0_ct, exp1_ct, lesion_mask, z_slice, output_path, patient_id):
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    
+def find_best_slice(mask, *ct_volumes):
+    """选择病灶面积较大且纹理可见性最好的切片。
+
+    策略：在病灶 mask 面积最大的 Top-30% 切片中，选择所有 CT 体积在 mask
+    区域内 HU 均值最高（最远离纯黑）的一层，避免论文图中出现"挖空"错觉。
+    """
+    z_areas = mask.sum(axis=(0, 1))                       # 每层的 mask 面积
+    z_indices = np.where(z_areas > 100)[0]
+    if len(z_indices) == 0:
+        return mask.shape[2] // 2
+
+    # Top-30% 面积的切片作为候选集
+    threshold = np.percentile(z_areas[z_indices], 70)
+    candidates = z_indices[z_areas[z_indices] >= threshold]
+    if len(candidates) == 0:
+        candidates = z_indices
+
+    # 在候选切片中，选择所有 CT 体积 mask 区域 HU 均值最高的层
+    best_z, best_score = candidates[len(candidates) // 2], -np.inf
+    for z in candidates:
+        m2d = mask[:, :, z] > 0
+        if m2d.sum() < 50:
+            continue
+        score = np.mean([float(np.mean(vol[:, :, z][m2d]))
+                         for vol in ct_volumes if vol is not None])
+        if score > best_score:
+            best_score = score
+            best_z = z
+    return int(best_z)
+
+
+def plot_slice_comparison(ref_ct, exp0_ct, exp1_ct, lesion_mask, z_slice,
+                          output_path, patient_id, exp2_ct=None):
+    """4 列切片对比: Real COPD | Exp-0 | Exp-1 | Exp-2。
+
+    使用肺气肿专用显示窗 (-1050, -800)，增强病灶区纹理可见性。
+    """
+    VMIN, VMAX = -1050, -800     # 肺气肿专用窄窗
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
     ref_slice = ref_ct[:, :, z_slice]
     exp0_slice = exp0_ct[:, :, z_slice]
     exp1_slice = exp1_ct[:, :, z_slice]
-    mask_slice = lesion_mask[:, :, z_slice]
-    
-    axes[0].imshow(ref_slice.T, cmap='gray', vmin=-1000, vmax=200, origin='lower')
-    axes[0].set_title(f'{patient_id} - Ref CT (Warped)')
+
+    axes[0].imshow(ref_slice.T, cmap='gray', vmin=VMIN, vmax=VMAX, origin='lower')
+    axes[0].set_title(f'{patient_id} — Real COPD (Ref, warped)', fontsize=11)
     axes[0].axis('off')
-    
-    axes[1].imshow(exp0_slice.T, cmap='gray', vmin=-1000, vmax=200, origin='lower')
-    axes[1].set_title('Exp-0 (Fixed Calib)')
+
+    axes[1].imshow(exp0_slice.T, cmap='gray', vmin=VMIN, vmax=VMAX, origin='lower')
+    axes[1].set_title('Exp-0 (Baseline)', fontsize=11)
     axes[1].axis('off')
-    
-    axes[2].imshow(exp1_slice.T, cmap='gray', vmin=-1000, vmax=200, origin='lower')
-    axes[2].set_title('Exp-1 (Adaptive Calib)')
+
+    axes[2].imshow(exp1_slice.T, cmap='gray', vmin=VMIN, vmax=VMAX, origin='lower')
+    axes[2].set_title('Exp-1 (Adaptive HU)', fontsize=11)
     axes[2].axis('off')
-    
-    axes[3].imshow(mask_slice.T, cmap='Reds', alpha=0.6, origin='lower')
-    axes[3].set_title('Lesion Mask')
+
+    if exp2_ct is not None:
+        exp2_slice = exp2_ct[:, :, z_slice]
+        axes[3].imshow(exp2_slice.T, cmap='gray', vmin=VMIN, vmax=VMAX, origin='lower')
+        axes[3].set_title('Exp-2 (CICI-FiLM v3)', fontsize=11)
+    else:
+        axes[3].text(0.5, 0.5, 'Exp-2\nnot available', ha='center', va='center',
+                     transform=axes[3].transAxes, fontsize=13, color='gray')
+        axes[3].set_title('Exp-2 (CICI-FiLM v3)', fontsize=11, color='gray')
     axes[3].axis('off')
-    
-    plt.tight_layout()
+
+    # 标注窗口参数
+    fig.text(0.5, 0.01, f'Display Window: [{VMIN}, {VMAX}] HU  |  Slice z={z_slice}',
+             ha='center', fontsize=10, color='gray')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -98,7 +145,11 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
         d = data.flatten()
         mu, sigma = float(np.mean(d)), float(np.std(d))
         ei_pct = float(np.sum(d < -950) / len(d) * 100)
-        all_stats[label] = {'mean': mu, 'std': sigma, 'ei_pct': ei_pct, 'n': len(d)}
+        all_stats[label] = {
+            'mean': mu, 'std': sigma, 'ei_pct': ei_pct,
+            'min': float(np.min(d)), 'max': float(np.max(d)),
+            'n': len(d),
+        }
 
         ax.hist(d, bins=80, range=(hist_lo, hist_hi), alpha=0.35, color=color,
                 density=True, histtype='stepfilled', label=None)
@@ -113,22 +164,31 @@ def plot_hu_histogram(ref_lesion, exp0_lesion, exp1_lesion, output_path, patient
     ax.set_xlabel('HU Value', fontsize=14, fontweight='bold')
     ax.set_ylabel('Density', fontsize=14, fontweight='bold')
     ax.tick_params(labelsize=12)
-    ax.legend(loc='upper left', fontsize=10, framealpha=0.9)
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
     ax.grid(True, alpha=0.3)
 
-    # 统计信息框：嵌入主图内部右上空白区域
-    stat_lines = []
+    # 统计信息框：嵌入主图内部，位于图例下方的右侧区域
+    stat_lines = ['HU Statistics (Lesion Region)', '─' * 42]
     for label, _, _ in draw_order:
         s = all_stats[label]
-        # 缩写标签以节省水平空间
         short = label.split('(')[0].strip() if '(' in label else label
+        stat_lines.append(f'{short}:')
         stat_lines.append(
-            f'{short}: μ={s["mean"]:.1f}  σ={s["std"]:.1f}  EI={s["ei_pct"]:.1f}%'
+            f'  Mean={s["mean"]:.1f}  Std={s["std"]:.1f}  '
+            f'EI={s["ei_pct"]:.1f}%'
         )
-    ax.text(0.98, 0.96, '\n'.join(stat_lines), transform=ax.transAxes,
-            fontsize=9, va='top', ha='right', fontfamily='monospace',
+        stat_lines.append(
+            f'  Min={s["min"]:.1f}  Max={s["max"]:.1f}  '
+            f'N={s["n"]:,}'
+        )
+    # y 坐标放在图例下方
+    n_legend_items = len(draw_order) + 1  # +1 for threshold line
+    stat_y = 0.96 - n_legend_items * 0.058
+    ax.text(0.98, stat_y, '\n'.join(stat_lines), transform=ax.transAxes,
+            fontsize=8.5, va='top', ha='right', fontfamily='monospace',
+            linespacing=1.25,
             bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
-                      edgecolor='#bbb', alpha=0.88))
+                      edgecolor='#bbb', alpha=0.90))
 
     n_vox = len(ref_lesion.flatten())
     gold_str = f' | GOLD {gold_stage}' if gold_stage else ''
@@ -198,10 +258,11 @@ def generate_diagnostics_for_patient(patient_id, exp0_dir, exp1_dir, ref_ct_dir,
             gold_stage = patient_features[short_key].get('GOLD') or \
                          patient_features[short_key].get('gold_stage')
 
-    z_slice = find_center_slice(lesion_mask)
+    z_slice = find_best_slice(lesion_mask, warped_ref, exp0_ct, exp1_ct, exp2_ct)
 
     slice_output = output_dir / f'{patient_id}_slice_comparison.png'
-    plot_slice_comparison(warped_ref, exp0_ct, exp1_ct, lesion_mask, z_slice, slice_output, patient_id)
+    plot_slice_comparison(warped_ref, exp0_ct, exp1_ct, lesion_mask, z_slice,
+                          slice_output, patient_id, exp2_ct=exp2_ct)
 
     ref_lesion = warped_ref[lesion_mask]
     exp0_lesion = exp0_ct[lesion_mask]
